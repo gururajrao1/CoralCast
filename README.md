@@ -3,6 +3,57 @@
 End-to-end 30-day coral bleaching-risk forecaster (Project 6.3) plus the
 seven deep-research extensions.
 
+## What this app does
+
+CoralCast predicts **coral bleaching risk 30 days ahead** by fusing two
+independent signals: what the reef looks like from space right now, and how
+much heat stress the water has accumulated.
+
+**1. It reads the reef from Sentinel-2 satellites.** Given multispectral
+imagery (bands B2 blue, B3 green, B4 red, B8 near-infrared), it computes
+coral-health indices per pixel: submerged NDVI, a blue/green color index,
+and Lyzenga depth-invariant indices (DII_23/24/34 via per-scene sand-ROI
+regression) that cancel out water-depth effects so shallow sand is not
+mistaken for healthy coral. Atmospheric correction (dark-object
+subtraction) and a water-column adjustment are applied first.
+
+**2. It quantifies ocean heat the way NOAA does.** From a daily sea-surface
+temperature (SST) series it builds the standard Degree Heating Week (DHW)
+metric over 12-week windows against the local maximum-monthly-mean (MMM)
+baseline, plus Hobday marine-heatwave events and categories, heating rates,
+hot streaks, days above 30 C, growing-degree-days, and thermal-variance
+features (variance is protective — steady heat bleaches less than spiky
+heat at the same mean).
+
+**3. It learns risk from pixels + heat, honestly calibrated.** A LightGBM
+classifier with monotonicity priors (risk rises with heat, falls with
+variance) predicts three levels per pixel — 0 No Stress, 1 Watch/Warning,
+2 Severe Bleaching Expected. An optional SITS temporal head (GRU/Transformer
+with masked-reconstruction pretraining) reads multi-date stacks; an SSTODE
+neural-ODE module forecasts SST itself; learned RCNN downscaling sharpens
+coarse SST; temperature scaling calibrates the probabilities so a "70%"
+means 70%. Leave-one-region-out cross-validation and a severity/lead-time
+harness report how skill degrades with distance and forecast horizon.
+
+**4. It trains on real bleaching observations, not just physics.** A join
+pipeline matches Reef Check survey records with CoRTAD SST and DHW
+baselines; a site-supervised path samples water pixels around survey
+coordinates to train the pixel head; the GCBD benchmark (4,219 real rows)
+scores the model against a DHW-only baseline with coordinates ablated.
+
+**Outputs.** Every run writes a georeferenced 30-day risk map
+(`coral_bleaching_risk_forecast.tif`), an evaluation report
+(`bleaching_evaluation_metrics.json`: ROC-AUC, precision-recall, DHW
+importance, calibration, LORO), and quicklook plots
+(`forecast_quicklook.png`, `eval/reliability.png`).
+
+**Bottom line from measurement, not hype.** Thermal-only model: 0.71
+accuracy vs 0.31 DHW baseline on real GCBD outcomes (ROC-AUC 0.86, matching
+published skill). Synthetic pipeline: ROC-AUC 0.947 with calibration error
+cut from 0.072 to 0.030. Known limit, stated plainly: skill does not
+transfer across ocean basins (LORO 0.46–0.65), so the deployment rule is
+train-per-basin — see G1/G2 in the gaps section.
+
 ## Quick start
 
 ```bash
