@@ -1,0 +1,112 @@
+{
+  "n": 4219,
+  "n_features": 41,
+  "drop_geo": false,
+  "accuracy": 0.709,
+  "roc_auc_ovr": 0.8635,
+  "per_class": {
+    "0": {
+      "average_precision": 0.8859886752386724,
+      "support": 89
+    },
+    "1": {
+      "average_precision": 0.758124158573969,
+      "support": 492
+    },
+    "2": {
+      "average_precision": 0.7634827944571658,
+      "support": 474
+    }
+  },
+  "dhw_baseline_accuracy": 0.3118,
+  "loro_by_realm": {
+    "per_region": [
+      {
+        "held_out": "Central Indo-Pacific",
+        "n_test": 1220,
+        "accuracy": 0.459,
+        "roc_auc_ovr": 0.6551
+      },
+      {
+        "held_out": "Eastern Indo-Pacific",
+        "n_test": 106,
+        "accuracy": 0.5,
+        "roc_auc_ovr": null
+      },
+      {
+        "held_out": "Temperate Australasia",
+        "n_test": 7,
+        "accuracy": 0.1429,
+        "roc_auc_ovr": null
+      },
+      {
+        "held_out": "Temperate Northern Pacific",
+        "n_test": 188,
+        "accuracy": 0.6489,
+        "roc_auc_ovr": 0.6877
+      },
+      {
+        "held_out": "Tropical Atlantic",
+        "n_test": 2348,
+        "accuracy": 0.4791,
+        "roc_auc_ovr": 0.5967
+      },
+      {
+        "held_out": "Tropical Eastern Pacific",
+        "n_test": 51,
+        "accuracy": 0.4706,
+        "roc_auc_ovr": null
+      },
+      {
+        "held_out": "Western Indo-Pacific",
+        "n_test": 294,
+        "accuracy": 0.551,
+        "roc_auc_ovr": null
+      }
+    ],
+    "mean_accuracy": 0.4645,
+    "std_accuracy": 0.1446,
+    "mean_roc_auc": 0.6465,
+    "n_roc_folds": 3
+  },
+  "ece": 0.1111,
+  "temperature_fit": {
+    "temperature": 1.7704,
+    "nll_before": 0.6599,
+    "nll_after": 0.5876
+  },
+  "top_gain_features": [
+    [
+      "Latitude_Degrees",
+      18395.0
+    ],
+    [
+      "TSA_Mean",
+      4890.7
+    ],
+    [
+      "Longitude_Degrees",
+      3460.5
+    ],
+    [
+      "Depth_m",
+      3155.9
+    ],
+    [
+      "Temperature_Mean",
+      2886.4
+    ],
+    [
+      "Temperature_Kelvin_Standard_Deviation",
+      2878.3
+    ],
+    [
+      "TSA_DHW",
+      2532.6
+    ],
+    [
+      "Temperature_Kelvin",
+      2350.2
+    ]
+  ]
+}

@@ -1,0 +1,112 @@
+{
+  "n": 4219,
+  "n_features": 39,
+  "drop_geo": true,
+  "accuracy": 0.71,
+  "roc_auc_ovr": 0.8602,
+  "per_class": {
+    "0": {
+      "average_precision": 0.8866142119980837,
+      "support": 89
+    },
+    "1": {
+      "average_precision": 0.7473772441316514,
+      "support": 492
+    },
+    "2": {
+      "average_precision": 0.7637550903985195,
+      "support": 474
+    }
+  },
+  "dhw_baseline_accuracy": 0.3118,
+  "loro_by_realm": {
+    "per_region": [
+      {
+        "held_out": "Central Indo-Pacific",
+        "n_test": 1220,
+        "accuracy": 0.4525,
+        "roc_auc_ovr": 0.6682
+      },
+      {
+        "held_out": "Eastern Indo-Pacific",
+        "n_test": 106,
+        "accuracy": 0.5189,
+        "roc_auc_ovr": null
+      },
+      {
+        "held_out": "Temperate Australasia",
+        "n_test": 7,
+        "accuracy": 0.1429,
+        "roc_auc_ovr": null
+      },
+      {
+        "held_out": "Temperate Northern Pacific",
+        "n_test": 188,
+        "accuracy": 0.6543,
+        "roc_auc_ovr": 0.7035
+      },
+      {
+        "held_out": "Tropical Atlantic",
+        "n_test": 2348,
+        "accuracy": 0.4872,
+        "roc_auc_ovr": 0.6098
+      },
+      {
+        "held_out": "Tropical Eastern Pacific",
+        "n_test": 51,
+        "accuracy": 0.5098,
+        "roc_auc_ovr": null
+      },
+      {
+        "held_out": "Western Indo-Pacific",
+        "n_test": 294,
+        "accuracy": 0.5646,
+        "roc_auc_ovr": null
+      }
+    ],
+    "mean_accuracy": 0.4757,
+    "std_accuracy": 0.1484,
+    "mean_roc_auc": 0.6605,
+    "n_roc_folds": 3
+  },
+  "ece": 0.1024,
+  "temperature_fit": {
+    "temperature": 1.765,
+    "nll_before": 0.6634,
+    "nll_after": 0.5929
+  },
+  "top_gain_features": [
+    [
+      "TSA_Mean",
+      12981.2
+    ],
+    [
+      "Temperature_Mean",
+      9710.1
+    ],
+    [
+      "Depth_m",
+      4805.8
+    ],
+    [
+      "Temperature_Kelvin_Standard_Deviation",
+      3789.8
+    ],
+    [
+      "TSA_DHW",
+      2935.7
+    ],
+    [
+      "SSTA_DHW",
+      2867.3
+    ],
+    [
+      "SSTA_Standard_Deviation",
+      2339.4
+    ],
+    [
+      "Distance_to_Shore",
+      2207.1
+    ]
+  ]
+}
