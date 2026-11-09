@@ -90,6 +90,41 @@ masked-reconstruction pretraining + supervised fine-tuning
 (SITSMamba-style two-stage). LightGBM carries monotonicity priors
 (heat ↑, variance ↓). `--loro` runs leave-one-region-out quadrant CV.
 
+## Data sources
+
+Every input file and where it came from. Files already vendored in `data/`
+so runs are offline-capable; links are for provenance and re-download.
+
+- `data/ReefCheck_raw.csv` — raw Reef Check bleaching surveys, from the
+  Sully et al. (2019) analysis repo ([repo](https://github.com/InstituteForGlobalEcology/Coral-bleaching-a-global-analysis-of-the-past-two-decades),
+  [raw CSV](https://raw.githubusercontent.com/InstituteForGlobalEcology/Coral-bleaching-a-global-analysis-of-the-past-two-decades/master/Reef%20Check%20Data%20Raw.csv)).
+  Paper: Sully et al. 2019, *Nature Communications*,
+  [doi:10.1038/s41467-019-09238-2](https://doi.org/10.1038/s41467-019-09238-2).
+- `data/ReefCheck_CoRTAD.csv` — the same surveys joined to CoRTAD thermal
+  variables + annual SST rate
+  ([raw CSV](https://raw.githubusercontent.com/InstituteForGlobalEcology/Coral-bleaching-a-global-analysis-of-the-past-two-decades/master/Reef_Check_with_cortad_variables_with_annual_rate_of_SST_change.csv);
+  CoRTAD = NOAA Coral Reef Temperature Anomaly Database).
+- `data/gcbd_bleaching_environmental.csv` — Global Coral Bleaching Database,
+  BCO-DMO dataset 773466 v2 (van Woesik & Burkepile 2022, CC BY 4.0),
+  [dataset](https://www.bco-dmo.org/dataset/773466),
+  paper [doi:10.1038/s41597-022-01121-y](https://doi.org/10.1038/s41597-022-01121-y).
+- `data/pilot_stack/*.tif` — Sentinel-2 L2A windows (B2/B3/B4/B8, tile
+  51RWH, 2022-08-25 + 2022-09-29, Sekisei Lagoon box), cut from
+  [sentinel-s2-l2a-cogs](https://registry.opendata.aws/sentinel-2-l2a-cogs/)
+  via `pilot_sekisei.py`; scene search through
+  [Earth Search STAC](https://earth-search.aws.element84.com/v1/search).
+- `data/pilot_sst.csv` — JPL MUR SST v4.1 gap-free daily SST at
+  24.31N 123.71E, via CoastWatch ERDDAP
+  ([griddap](https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST41.html)),
+  MMM 29.98 C.
+- `sst_noaa_daily.csv` — not external: synthetic fallback SST the
+  forecaster writes when no `--sst_csv` is given.
+- Full GCBD via NCEI Accession 0228498 (33,244 records, 1963–2021),
+  [catalog entry](https://catalog.data.gov/dataset/global-coral-bleaching-database-ncei-accession-0228498)
+  — attempted, download flow blocked (see G2).
+- AIMS LTMP, eAtlas GeoNetwork, ALA BioCache, CoralWatch BioCollect,
+  Allen Atlas — attempted label/imagery pulls, all blocked (see G2).
+
 ## Real-world benchmark (GCBD, n=4,219, `python eval/gcbd_benchmark.py`)
 
 Model vs DHW-only baseline on real bleaching outcomes: accuracy 0.71 vs
