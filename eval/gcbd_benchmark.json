@@ -1,112 +1,219 @@
 {
-  "n": 4219,
+  "n": 4113,
   "n_features": 41,
   "drop_geo": false,
-  "accuracy": 0.709,
-  "roc_auc_ovr": 0.8635,
+  "covariate_csv": null,
+  "dedupe": {
+    "n_raw": 4219,
+    "n_deduped": 4113,
+    "n_dropped": 106
+  },
+  "run": {
+    "run_id": "5e8e66f53541",
+    "timestamp_utc": "2026-11-11T17:12:29+00:00",
+    "git_commit": "f0298cc",
+    "argv": [
+      "--seeds",
+      "0,1,2",
+      "--out",
+      "eval/gcbd_benchmark.json"
+    ],
+    "seed": 0
+  },
+  "accuracy": 0.6987,
+  "roc_auc_ovr": 0.8537,
+  "seed_sweep": {
+    "seeds": [
+      0,
+      1,
+      2
+    ],
+    "mean_accuracy": 0.7,
+    "std_accuracy": 0.0088,
+    "mean_roc_auc": 0.857
+  },
   "per_class": {
     "0": {
-      "average_precision": 0.8859886752386724,
-      "support": 89
+      "average_precision": 0.8904097061754299,
+      "support": 88
     },
     "1": {
-      "average_precision": 0.758124158573969,
-      "support": 492
+      "average_precision": 0.723201010034684,
+      "support": 481
     },
     "2": {
-      "average_precision": 0.7634827944571658,
-      "support": 474
+      "average_precision": 0.7437682434066117,
+      "support": 460
     }
   },
-  "dhw_baseline_accuracy": 0.3118,
+  "dhw_baseline_accuracy": 0.3324,
+  "majority_baseline_accuracy": 0.4674,
+  "grouped_site_holdout": {
+    "accuracy": 0.7223,
+    "n_test": 965,
+    "n_groups_test": 675
+  },
+  "spatial_block_cv": {
+    "mean_accuracy": 0.6895,
+    "std_accuracy": 0.3506,
+    "n_blocks_eval": 25,
+    "n_blocks_total": 396,
+    "n_blocks": 396,
+    "block_deg": 1.0
+  },
+  "forward_temporal_cv": {
+    "mean_accuracy": 0.5071,
+    "n_folds": 3
+  },
+  "per_basin": {
+    "Central Indo-Pacific": {
+      "n": 1214,
+      "accuracy": 0.7007
+    },
+    "Eastern Indo-Pacific": {
+      "n": 102,
+      "accuracy": 0.3077
+    },
+    "Temperate Australasia": {
+      "n": 7,
+      "accuracy": null,
+      "note": "n<50 or single-class: skipped"
+    },
+    "Temperate Northern Atlantic": {
+      "n": 5,
+      "accuracy": null,
+      "note": "n<50 or single-class: skipped"
+    },
+    "Temperate Northern Pacific": {
+      "n": 188,
+      "accuracy": 0.6809
+    },
+    "Tropical Atlantic": {
+      "n": 2253,
+      "accuracy": 0.6454
+    },
+    "Tropical Eastern Pacific": {
+      "n": 51,
+      "accuracy": 0.3077
+    },
+    "Western Indo-Pacific": {
+      "n": 293,
+      "accuracy": 0.7568
+    }
+  },
+  "skill_by_severity": {
+    "overall_accuracy": 0.6987,
+    "dhw_ge_4": {
+      "n": 494,
+      "accuracy": 0.6943
+    },
+    "dhw_ge_8": {
+      "n": 261,
+      "accuracy": 0.7165
+    }
+  },
+  "feature_parity": {
+    "n_deployment_thermal": 30,
+    "n_present_in_gcbd": 0,
+    "present": [],
+    "note": "benchmark uses raw CoRTAD columns; overlap by exact name is expected to be ~0"
+  },
   "loro_by_realm": {
     "per_region": [
       {
         "held_out": "Central Indo-Pacific",
-        "n_test": 1220,
-        "accuracy": 0.459,
-        "roc_auc_ovr": 0.6551
+        "n_test": 1214,
+        "accuracy": 0.4621,
+        "roc_auc_ovr": 0.655
       },
       {
         "held_out": "Eastern Indo-Pacific",
-        "n_test": 106,
-        "accuracy": 0.5,
+        "n_test": 102,
+        "accuracy": 0.5294,
         "roc_auc_ovr": null
       },
       {
         "held_out": "Temperate Australasia",
         "n_test": 7,
-        "accuracy": 0.1429,
+        "accuracy": 0.2857,
         "roc_auc_ovr": null
       },
       {
         "held_out": "Temperate Northern Pacific",
         "n_test": 188,
-        "accuracy": 0.6489,
-        "roc_auc_ovr": 0.6877
+        "accuracy": 0.6596,
+        "roc_auc_ovr": 0.6836
       },
       {
         "held_out": "Tropical Atlantic",
-        "n_test": 2348,
-        "accuracy": 0.4791,
-        "roc_auc_ovr": 0.5967
+        "n_test": 2253,
+        "accuracy": 0.4856,
+        "roc_auc_ovr": 0.5918
       },
       {
         "held_out": "Tropical Eastern Pacific",
         "n_test": 51,
-        "accuracy": 0.4706,
+        "accuracy": 0.6078,
         "roc_auc_ovr": null
       },
       {
         "held_out": "Western Indo-Pacific",
-        "n_test": 294,
-        "accuracy": 0.551,
+        "n_test": 293,
+        "accuracy": 0.5085,
         "roc_auc_ovr": null
       }
     ],
-    "mean_accuracy": 0.4645,
-    "std_accuracy": 0.1446,
-    "mean_roc_auc": 0.6465,
+    "mean_accuracy": 0.5055,
+    "std_accuracy": 0.1104,
+    "mean_roc_auc": 0.6435,
     "n_roc_folds": 3
   },
-  "ece": 0.1111,
+  "ece": 0.1206,
   "temperature_fit": {
-    "temperature": 1.7704,
-    "nll_before": 0.6599,
-    "nll_after": 0.5876
+    "temperature": 1.9478,
+    "temperature_std": 0.0728,
+    "nll_before": 0.7202,
+    "nll_after": 0.6156,
+    "n_splits": 3,
+    "cross_fit": true
+  },
+  "brier_skill": {
+    "brier": 0.1438,
+    "brier_ref_climatology": 0.1914,
+    "bss_vs_climatology": 0.2487
   },
   "top_gain_features": [
     [
       "Latitude_Degrees",
-      18395.0
-    ],
-    [
-      "TSA_Mean",
-      4890.7
-    ],
-    [
-      "Longitude_Degrees",
-      3460.5
-    ],
-    [
-      "Depth_m",
-      3155.9
+      17638.8
     ],
     [
       "Temperature_Mean",
-      2886.4
+      4535.3
+    ],
+    [
+      "Depth_m",
+      3983.4
+    ],
+    [
+      "Longitude_Degrees",
+      3956.3
+    ],
+    [
+      "TSA_Mean",
+      2758.8
     ],
     [
       "Temperature_Kelvin_Standard_Deviation",
-      2878.3
+      2318.3
     ],
     [
       "TSA_DHW",
-      2532.6
+      2166.9
     ],
     [
-      "Temperature_Kelvin",
-      2350.2
+      "SSTA_DHW",
+      2164.0
     ]
   ]
 }
