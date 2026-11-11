@@ -136,8 +136,8 @@ GCBD numbers below are re-measured Nov 11 (R1–R10 build, project venv,
 R2/R6 rows and the R8 `--per_basin` run, both re-measured Nov 11. `--prune_dead` + `--downscale` variant
 (re-measured Nov 11): 21/37 features kept, model parity 0.965/0.947, DHW
 gain share 0.231 → 0.300, downscale val RMSE 0.076, site 0.4931 — pruning
-removes dead weight without losing skill. Test suite: 28 tests
-(15 pre-existing + 13 roadmap), 28/28 green Nov 11 on the project venv.
+removes dead weight without losing skill. Test suite: 35 tests
+(15 pre-existing + 20 roadmap), 35/35 green Nov 11 on the project venv.
 
 ### 5.1 Main synthetic pipeline (n_test = 24,000)
 
@@ -179,6 +179,24 @@ forward-temporal CV **0.4919** (3 folds). Severity cut: DHW≥4 0.6964
 Depth_m. Feature parity: 0 of 30 deployment thermal names exist in GCBD
 (raw CoRTAD columns instead — expected, documented).
 
+Full-scale global-predictor probes (Nov 11, n=4113, 400 trees,
+same-split both arms — not seed sweeps, report means over 2–3 seeds):
+
+| Probe | Global | Challenger | Delta |
+|---|---|---|---|
+| Grouped-site hier-500 | 0.700 | 0.705 | +0.005, positive all 3 seeds |
+| Forward-temporal hier-500 | 0.495 | 0.514 | +0.019, both seeds |
+| Forward-temporal adaptive | 0.488 | 0.526 | +0.038, both seeds (fold spread dominates) |
+| LORO CORAL | 0.494 | 0.416 | −0.078, rejected and removed |
+
+Hierarchical shrink (`models/hierarchical_bleach.py`, kappa=500) is the
+only approach that helps on both axes; adaptive heat features
+(`eval/adaptive_features.py`, train-year-only fit) help temporal only.
+CORAL helps only Tropical Atlantic (+0.04) while wrecking TNP/EIP —
+covariance alignment is not a global story on 4k rows. Nothing here
+moves strict LORO (structural); the shippable gains are grouped-site
+and temporal.
+
 ### 5.3 Realm leave-one-out (thermal-only; ROC null where a fold lacks a class)
 
 | Realm | n | LORO acc | LORO ROC | Per-basin acc |
@@ -209,7 +227,7 @@ hence train-per-basin *with a minimum-n rule*.
 | 5 | SSTODE (`models/sstode_forecast.py`) | rmse < persistence | pass | diffusion term is mislabeled damping; train/infer seasonal-phase mismatch; no uncertainty |
 | 6 | Multivariate (`features/multivariate.py`) | kept incl. freq_above_mmm1_12w | pass | fillna(0)/min_periods=1 biases early windows; optical → global mean/p10 only |
 | 7 | Severity/lead-time (`eval/severity_leadtime.py`) | by_lead len 8 | pass (8-row demo; 22-row full) | ECE on P(severe) only; temp fit on test split; silent null-AUC folds |
-| — | Main forecaster | 28/28 `tests/test_all7.py` | 28/28 OK Nov 11 (project venv, 313 s) | roadmap tests pin redefined-DHW tiers, nulls, cross-fit determinism, BSS=1 on perfect, prune-mask width, block patches, registry |
+| — | Main forecaster | 35/35 `tests/test_all7.py` | 35/35 OK Nov 11 (project venv, ~80 s) | roadmap tests pin redefined-DHW tiers, nulls, cross-fit determinism, BSS=1 on perfect, prune-mask width, block patches, registry, hier-blend math/fallback, adaptive causal contract |
 
 ### 5.5 Pilot Sekisei (all real, n = 69 labels)
 
@@ -287,7 +305,18 @@ Each item: what to change, why (literature), expected gain, effort.
   run `f6b92864375b`): deployed 0.9625 / ROC 0.9479 vs global 0.9655
   (delta −0.003; NE 0.9616, NW 0.9649, SE 0.9617, SW 0.9618 over
   ~5.6–6.5k test rows per basin) — parity, expected on the smooth toy
-  field; the transfer to real realm labels is still open.
+  field. Deep-research follow-up (Nov 11, full-scale GCBD probes, n=4113,
+  400 trees, same-split both arms): shrunk per-realm LightGBM blend
+  (`models/hierarchical_bleach.py`, w=n/(n+kappa), kappa=500 wins all 3
+  tune seeds) beats the global head on grouped-site (+0.005 mean, positive
+  all 3 seeds) and forward-temporal (+0.019 mean, both seeds — the
+  subsample fold-1 collapse did not persist); train-year-only adaptive
+  heat features (`eval/adaptive_features.py`, +0.035/+0.042 temporal,
+  both seeds, fold spread dominates); CORAL covariance alignment
+  (`eval/coral_da.py`) HURTS overall (LORO 0.41 vs 0.49 — helps only
+  Tropical Atlantic +0.04, wrecks TNP 0.64→0.10 and EIP) and was removed,
+  not merged. Strict LORO stays ~0.49 by construction (unseen realm has
+  no head); grouped-site is the shippable gain.
 - **R9 Atlas-style pilot redo (M).** Warning-triggered biweekly
   baseline-vs-2wk-post median brightening with QA60/SCL masking (Allen
   Atlas design); fix the 2003–04 vs 2022 mismatch; handle 96% imbalance.
@@ -297,8 +326,9 @@ Each item: what to change, why (literature), expected gain, effort.
 - **R10 Test/registry hardening (S).** Pin GCBD 0.71/0.86 + ECE/LORO +
   byte-identical determinism, rule-label tiers, `load_stack` parsing,
   export/CLI flags, stronger-than-trivial gates. Shipped Nov 11: 13 roadmap
-  tests (28/28 green) plus `eval/run_registry.py` stamping
-  run-id/seed/git-hash/argv into every metrics JSON and `runs/registry.jsonl`.
+  tests plus `eval/run_registry.py` stamping
+  run-id/seed/git-hash/argv into every metrics JSON and `runs/registry.jsonl`
+  (35/35 green after the global-predictor probes added 7 more).
 
 Deferred with reason: GNN / CNN-LSTM / PINN bleaching heads — no credible
 peer-reviewed skill numbers found (2022–2026 hits were non-peer-reviewed
@@ -313,12 +343,17 @@ feature providers, not bleaching predictors.
 
 G1 Cross-basin transfer (biggest): LORO-by-realm 0.46/0.65 vs stratified
 0.71/0.86 — thermal-gap / shifting baselines, not code. Shipped: per-basin
-rule + LORO harness. Real fix: AIMS 2022 pull, hierarchical partial
-pooling (needs a mixed model — LightGBM can't), or domain adaptation.
+rule + LORO harness + shrunk per-realm LightGBM blend (partial pooling
+*inside* LightGBM, kappa=500; grouped-site +0.005, temporal +0.019 at
+full scale). CORAL alignment tested and rejected (LORO 0.41 vs 0.49).
+Remaining: AIMS 2022 pull for data scale; strict LORO is structural, so
+ship grouped-site gains and stop chasing LORO with blending.
 Do NOT claim global skill.
 G2 S2 heatwave pilot with contemporaneous labels (blocked, 6 failed
-attempts): BCO-DMO GCBD ends 2016; NCEI full GCBD (accession 0228498)
-JS/302-gated; figshare has no copy; Japan ReefCheck ends 2015; CoralWatch
+attempts): BCO-DMO GCBD ends 2016; NCEI full GCBD (accession 0228498,
+33,244 records 1963–2021 — landing page verified reachable with plain
+HTTPS+FTP links, bytes not yet pulled); figshare has no copy;
+Japan ReefCheck ends 2015; CoralWatch
 lives in the BioCollect project store (needs project-API work); Allen
 Atlas layers unverified (likely GEE asset); AIMS dashboard is a JS shell.
 Ranked next: AIMS LTMP 2022 via data.aims.gov.au, 2020 heatwave fallback,
@@ -378,9 +413,13 @@ baselines, RCNN/SSTODE/SITS rework, feature hygiene, cross-fit calibration,
 per-basin models, pilot hardening, 13 roadmap tests + run registry),
 re-measured all numbers above, 28/28 tests green. Per-basin deployment
 wiring (R8, `--per_basin`) followed the same day, 30/30 tests green.
-Next session: re-run the fastest line above, then pick the top unblocked
-item that still needs data access (AIMS 2022 pull for G2, or real realm
-labels to transfer the per-basin wiring beyond quadrants).
+Deep-research combo followed: hierarchical shrink (kappa=500, +0.005
+grouped / +0.019 temporal) and adaptive heat features (+0.038 temporal)
+both win at full scale; CORAL rejected (0.41 vs 0.49 LORO); 35/35 tests
+green, CORAL module removed unmerged.
+Next session: re-run the fastest line above, then either pull the NCEI
+33k-record archive (landing page verified, bytes not yet pulled) or wire
+the hier-500/adaptive winners into `run_benchmark` for tracked numbers.
 
 ## 9. References
 
