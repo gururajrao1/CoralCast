@@ -406,6 +406,114 @@ class TestRoadmap(unittest.TestCase):
         self.assertEqual(g[3, 5], "SE")
         self.assertEqual(set(np.unique(g)), {"NW", "NE", "SW", "SE"})
 
+    def test_hierarchical_blend_math(self):
+        import lightgbm as lgb
+        import numpy as np
+        from models.hierarchical_bleach import HierarchicalBleachClassifier
+        rng = np.random.default_rng(11)
+        X = rng.standard_normal((140, 5))
+        y = ((X[:, 0] > 0).astype(int) + (X[:, 1] > 0).astype(int))
+        groups = np.array(["A"] * 80 + ["B"] * 60)
+        kappa = 50.0
+        clf = HierarchicalBleachClassifier(kappa=kappa, n_estimators=10,
+                                          min_n=10, seed=0).fit(X, y, groups)
+        # Manual shrunk blend with identically configured heads must match.
+        def _head(m):
+            c = lgb.LGBMClassifier(
+                objective="multiclass", num_class=3, n_estimators=10,
+                learning_rate=0.05, num_leaves=63, min_child_samples=40,
+                subsample=0.9, colsample_bytree=0.9, reg_lambda=5.0,
+                class_weight="balanced", verbose=-1, random_state=0)
+            return c.fit(X[m], y[m])
+        g = _head(np.ones(len(y), bool))
+        pa = _head(groups == "A")
+        w_a = 80 / (80 + kappa)
+        expect_a = (w_a * pa.predict_proba(X[groups == "A"])
+                    + (1 - w_a) * g.predict_proba(X[groups == "A"]))
+        np.testing.assert_allclose(
+            clf.predict_proba(X, groups)[groups == "A"], expect_a,
+            rtol=1e-6)
+        # No groups -> pure global head.
+        np.testing.assert_allclose(clf.predict_proba(X),
+                                   g.predict_proba(X), rtol=1e-6)
+
+    def test_hierarchical_fallback(self):
+        import numpy as np
+        from models.hierarchical_bleach import HierarchicalBleachClassifier
+        rng = np.random.default_rng(12)
+        X = rng.standard_normal((120, 5))
+        y = ((X[:, 0] > 0).astype(int) + (X[:, 1] > 0).astype(int))
+        # tiny (n=8 < min_n) + single-class realms fall back to global.
+        groups = np.array(["BIG"] * 100 + ["tiny"] * 8 + ["flat"] * 12)
+        y = np.where(groups == "flat", 1, y)
+        clf = HierarchicalBleachClassifier(kappa=100.0, n_estimators=10,
+                                          min_n=50, seed=0).fit(X, y, groups)
+        self.assertIsNone(clf.basin_models_["tiny"])
+        self.assertIsNone(clf.basin_models_["flat"])
+        self.assertIsNotNone(clf.basin_models_["BIG"])
+        self.assertEqual(clf.basin_weight_["tiny"], 0.0)
+        proba = clf.predict_proba(X, groups)
+        self.assertEqual(proba.shape, (120, 3))
+        # Unknown realm at predict time also falls back without raising.
+        q = clf.predict_proba(X[:5], np.array(["XX"] * 5))
+        np.testing.assert_allclose(
+            q, clf.global_model_.predict_proba(X[:5]), rtol=1e-6)
+
+    def test_tune_kappa_smoke(self):
+        import numpy as np
+        from models.hierarchical_bleach import tune_kappa
+        rng = np.random.default_rng(13)
+        X = rng.standard_normal((150, 5))
+        y = ((X[:, 0] > 0).astype(int) + (X[:, 1] > 0).astype(int))
+        groups = np.array(["A"] * 90 + ["B"] * 60)
+        sites = np.array([f"s{i % 30}" for i in range(150)])
+        out = tune_kappa(X, y, groups, sites, kappas=(10.0, 500.0),
+                         seed=0, n_estimators=10, min_n=10)
+        self.assertIn(out["best_kappa"], (10.0, 500.0))
+        self.assertEqual(set(out["per_kappa"]), {10.0, 500.0})
+
+    def test_adaptive_causal_contract(self):
+        import numpy as np
+        import pandas as pd
+        from eval.adaptive_features import (ADAPTIVE_COLS,
+                                            add_adaptive_features_train_test)
+        tr = pd.DataFrame({
+            "SSTA_DHW": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "TSA_DHW": [0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+            "SSTA": [0.1, 0.2, 0.1, 0.3, 0.2, 0.4],
+            "SSTA_Maximum": [0.5, 0.6, 0.5, 0.7, 0.6, 0.8],
+            "Date_Year": [2000, 2000, 2001, 2001, 2002, 2002]})
+        te = pd.DataFrame({
+            "SSTA_DHW": [7.0, 8.0],
+            "TSA_DHW": [3.5, 4.0],
+            "SSTA": [0.5, 0.6],
+            "SSTA_Maximum": [0.9, 1.0],
+            "Date_Year": [2005, 2006]})  # novel future years
+        thr, A_tr, A_te = add_adaptive_features_train_test(tr, te)
+        self.assertEqual(list(A_te.columns), ADAPTIVE_COLS)
+        self.assertFalse(np.isnan(A_te.to_numpy()).any())
+        # Train-only reference: excess equals manual dhw - q75.
+        np.testing.assert_allclose(
+            A_te["adapt_dhw_excess_q75"].to_numpy(),
+            te["SSTA_DHW"].to_numpy() - thr["dhw_q75"], rtol=1e-9)
+        # Deterministic: same input -> same output.
+        _, _, A_te2 = add_adaptive_features_train_test(tr, te)
+        pd.testing.assert_frame_equal(A_te, A_te2)
+        # Test rows never leak into the reference.
+        self.assertLessEqual(thr["train_year_max"], 2002.0)
+
+    def test_adaptive_temporal_smoke(self):
+        import pandas as pd
+        from eval.adaptive_features import forward_temporal_delta
+        from eval.gcbd_benchmark import dedupe_events
+        df = pd.read_csv("data/gcbd_bleaching_environmental.csv",
+                         low_memory=False)
+        df = dedupe_events(df).reset_index(drop=True)
+        out = forward_temporal_delta(df, seed=0, n_estimators=10)
+        self.assertGreaterEqual(out["n_folds"], 1)
+        self.assertEqual(len(out["base_per_fold"]), out["n_folds"])
+        self.assertIsInstance(out["delta_mean"], float)
+
     def test_per_basin_train_and_route(self):
         import numpy as np
         from coral_bleaching_forecaster import (predict_per_basin,
