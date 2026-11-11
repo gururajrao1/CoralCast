@@ -1,60 +1,101 @@
-# Multispectral Coral Bleaching Predictor
+# CoralCast — 30-Day Coral Bleaching Risk Forecaster
 
-End-to-end 30-day coral bleaching-risk forecaster (Project 6.3) plus the
-seven deep-research extensions.
+> Status: research prototype, re-measured Nov 11 after the R1–R10 build.
+> Real-data headline: **0.70 accuracy (±0.01 over 3 seeds) vs 0.33 DHW /
+> 0.47 majority baselines (ROC-AUC 0.85)** on GCBD n=4,113 deduped rows,
+> thermal-only. Deployment rule: **train per basin with a minimum-n
+> cutoff** — skill does not transfer across ocean basins (realm-LORO
+> ~0.50, temporal CV ~0.50). Do not quote the stratified 0.70 without an
+> honest-split number beside it.
 
-## What this app does
+## 1. What this is
 
-CoralCast predicts **coral bleaching risk 30 days ahead** by fusing two
-independent signals: what the reef looks like from space right now, and how
-much heat stress the water has accumulated.
+CoralCast predicts **coral bleaching risk 30 days ahead** at reef scale by
+fusing two independent signals: what the reef looks like from space right
+now, and how much heat stress the water has accumulated.
 
-**1. It reads the reef from Sentinel-2 satellites.** Given multispectral
-imagery (bands B2 blue, B3 green, B4 red, B8 near-infrared), it computes
-coral-health indices per pixel: submerged NDVI, a blue/green color index,
-and Lyzenga depth-invariant indices (DII_23/24/34 via per-scene sand-ROI
-regression) that cancel out water-depth effects so shallow sand is not
-mistaken for healthy coral. Atmospheric correction (dark-object
-subtraction) and a water-column adjustment are applied first.
+- **Nowcast vs forecast.** NOAA Coral Reef Watch DHW is a diagnostic
+  (heat accumulated *so far*). CoralCast adds a true forecast horizon:
+  SST is forecast forward, DHW is recomputed ahead, and a severity /
+  lead-time harness reports skill per lead week, against the operational
+  targets of ~6 weeks (best published XGBoost early-warning, Univ. Miami
+  2025) and 4 months (NOAA CRW bleaching Outlook).
+- **Problem statement.** Given multispectral imagery + a daily SST series
+  (+ optional survey labels), output per-pixel risk
+  {0 No Stress, 1 Watch/Warning, 2 Severe Bleaching Expected} 30 days out
+  as a georeferenced map with calibrated probabilities.
+- **History.** Built Nov 8 as "Project 6.3 Multispectral Coral Bleaching
+  Predictor" (~41 files, 13 probe scripts), verified Nov 9 (15/15 tests,
+  synthetic + GCBD benchmarks), pushed to
+  `https://github.com/gururajrao1/CoralCast` (10 commits, 40 files), docs
+  pass `f0298cc`. Later sessions moved to other projects, so coral numbers
+  below are the frozen Nov 9 state unless re-run.
 
-**2. It quantifies ocean heat the way NOAA does.** From a daily sea-surface
-temperature (SST) series it builds the standard Degree Heating Week (DHW)
-metric over 12-week windows against the local maximum-monthly-mean (MMM)
-baseline, plus Hobday marine-heatwave events and categories, heating rates,
-hot streaks, days above 30 C, growing-degree-days, and thermal-variance
-features (variance is protective — steady heat bleaches less than spiky
-heat at the same mean).
+## 2. How we approach it
 
-**3. It learns risk from pixels + heat, honestly calibrated.** A LightGBM
-classifier with monotonicity priors (risk rises with heat, falls with
-variance) predicts three levels per pixel — 0 No Stress, 1 Watch/Warning,
-2 Severe Bleaching Expected. An optional SITS temporal head (GRU/Transformer
-with masked-reconstruction pretraining) reads multi-date stacks; an SSTODE
-neural-ODE module forecasts SST itself; learned RCNN downscaling sharpens
-coarse SST; temperature scaling calibrates the probabilities so a "70%"
-means 70%. Leave-one-region-out cross-validation and a severity/lead-time
-harness report how skill degrades with distance and forecast horizon.
+```
+Sentinel-2 B2/B3/B4/B8 ──> DOS correction + water-column adj ──> indices
+   (submerged NDVI, blue/green SCI, Lyzenga DII_23/24/34 via sand-ROI regression)
+SST series ──> DHW(12wk, MMM) + Hobday MHW + transplants(GDD/CWSI/days>30C/...) ──> 37 features
+37 features ──> LightGBM (monotonic priors: risk rises w/ heat, falls w/ variance) ──> risk map
+Optional heads: SITS temporal encoder │ SSTODE SST forecast │ RCNN downscaler │ SatMAE pretrain
+Labels: ReefCheck+CoRTAD join │ site-supervised pixels │ GCBD benchmark │ Sekisei pilot
+Eval: temperature scaling │ realm-LORO │ severity-by-lead (hit/FAR) │ reliability plots
+```
 
-**4. It trains on real bleaching observations, not just physics.** A join
-pipeline matches Reef Check survey records with CoRTAD SST and DHW
-baselines; a site-supervised path samples water pixels around survey
-coordinates to train the pixel head; the GCBD benchmark (4,219 real rows)
-scores the model against a DHW-only baseline with coordinates ablated.
+- **Feature set (37).** `PIXEL_FEATURES` (7, optical) + `THERMAL_FEATURES`
+  (30, SST-derived) = `FEATURE_NAMES`, assembled by the shared
+  `pixel_block` used identically in training, site path, and forecast
+  export. Monotonicity priors encode domain knowledge (heat ↑ risk,
+  thermal variance ↓ risk at fixed mean).
+- **Synthetic path.** `generate_synthetic_bands` / `generate_synthetic_sst`
+  let the full pipeline run with no downloads. Labels come from
+  `rule_labels()` (DHW + NDVI rules + 5% injected noise) — so synthetic
+  skill is **partly circular**; treat 0.965 as a pipeline smoke test, not
+  a skill claim.
+- **Real paths.** Tabular: ReefCheck surveys joined to CoRTAD weekly SST
+  (`data/join_reefcheck_cortad.py`); GCBD benchmark (`eval/`); spatial:
+  Sekisei pilot S2 stack + MUR SST + ReefCheck labels (`pilot_sekisei.py`
+  fetch-only; the run itself is the forecaster CLI).
+- **Outputs.** `coral_bleaching_risk_forecast.tif` (georeferenced risk
+  map), `bleaching_evaluation_metrics.json` (ROC-AUC, PR, DHW importance,
+  calibration, LORO), `forecast_quicklook.png`, `eval/reliability.png`.
+  **Warning: outputs are overwritten every run (G10)** — copy them aside
+  with run-id/seed/git-hash before comparing runs. Every run now stamps
+  run-id/seed/git-hash/argv into its metrics JSON and appends one JSONL line
+  to `runs/registry.jsonl` (`eval/run_registry.py`; forecaster, benchmark,
+  and pilot all record) — consult the registry instead of diffing bare
+  files.
 
-**Outputs.** Every run writes a georeferenced 30-day risk map
-(`coral_bleaching_risk_forecast.tif`), an evaluation report
-(`bleaching_evaluation_metrics.json`: ROC-AUC, precision-recall, DHW
-importance, calibration, LORO), and quicklook plots
-(`forecast_quicklook.png`, `eval/reliability.png`).
+## 3. Data sources
 
-**Bottom line from measurement, not hype.** Thermal-only model: 0.71
-accuracy vs 0.31 DHW baseline on real GCBD outcomes (ROC-AUC 0.86, matching
-published skill). Synthetic pipeline: ROC-AUC 0.947 with calibration error
-cut from 0.072 to 0.030. Known limit, stated plainly: skill does not
-transfer across ocean basins (LORO 0.46–0.65), so the deployment rule is
-train-per-basin — see G1/G2 in the gaps section.
+| File in repo | Upstream source | Notes / seam |
+|---|---|---|
+| `data/ReefCheck_raw.csv` | Sully et al. 2019 repo ([raw CSV](https://raw.githubusercontent.com/InstituteForGlobalEcology/Coral-bleaching-a-global-analysis-of-the-past-two-decades/master/Reef%20Check%20Data%20Raw.csv)), paper [doi:10.1038/s41467-019-09238-2](https://doi.org/10.1038/s41467-019-09238-2) | Survey-level bleaching % |
+| `data/ReefCheck_CoRTAD.csv` | Same repo ([joined CSV](https://raw.githubusercontent.com/InstituteForGlobalEcology/Coral-bleaching-a-global-analysis-of-the-past-two-decades/master/Reef_Check_with_cortad_variables_with_annual_rate_of_SST_change.csv)); CoRTAD = [NOAA NCEI](http://www.ncei.noaa.gov/products/coral-reef-temperature-anomaly-database), [accession](https://accession.nodc.noaa.gov/NCEI-CoRTADv6) | Weekly 4 km AVHRR 1982–2022. **Frozen end-2022**: append CRW 5km / OISST / OSTIA for inference |
+| `data/gcbd_bleaching_environmental.csv` | GCBD BCO-DMO 773466 v2 ([dataset](https://www.bco-dmo.org/dataset/773466)), paper [doi:10.1038/s41597-022-01121-y](https://doi.org/10.1038/s41597-022-01121-y); full 33k-record NCEI Accession 0228498 ([catalog](https://catalog.data.gov/dataset/global-coral-bleaching-database-ncei-accession-0228498)) | Vendored copy n=4,219 (1980–2016, zero S2-era bleached rows). Full-NCEI pull JS/302-gated (G2) |
+| `data/pilot_stack/*.tif` | [Sentinel-2 L2A COGs](https://registry.opendata.aws/sentinel-2-l2a-cogs/), searched via [Earth Search STAC](https://earth-search.aws.element84.com/v1/search) | Tile 51RWH, 2022-08-25 + 2022-09-29, Sekisei box lon 123.65–123.80 / lat 24.30–24.42 |
+| `data/pilot_sst.csv` | JPL MUR SST v4.1 via [CoastWatch ERDDAP](https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST41.html) | 1,033 d at 24.31N 123.71E, MMM 29.98 C. Chunk yearly; multi-year single queries drop |
+| `data/pilot_labels.csv` | Derived: ReefCheck_CoRTAD Japan/Sekisei bbox + all bleached Japan rows | 69 rows; surveys are 2003–2004 vs 2022 imagery (mismatch, G7) |
+| `sst_noaa_daily.csv` | **Not external — synthetic fallback** written by `load_sst` when no `--sst_csv` is given | Provenance hazard: name looks observational; content is generated with a hard-coded heatwave tail |
+| `data/labels.csv` (60 rows), `data/demo_sites.csv` | Synthetic demo fixtures | Toy baselines only (0.233 on n=60) |
 
-## Quick start
+Fetch notes (hard-won, keep): Earth Search STAC needs POST + full RFC3339
+datetimes; MUR SST via ERDDAP griddap — chunk yearly, single-point queries
+are reliable, multi-year single queries drop; GeoNetwork POST search works
+(`catalogue.eatlas.org.au/geonetwork/srv/api/search/records/_search`);
+CoralWatch UID `dr17828` returns 0 (data lives in the BioCollect project
+store `9c55416c-f56a-4917-a65d-daadcb8f51f7`); eAtlas nextcloud sharealias
+`/download` links 404.
+
+Operational references (not vendored): NOAA CRW 5km v3.1 DHW
+([product](https://coralreefwatch.noaa.gov/product/5km/tutorial/crw04a_intro_products.php),
+HotSpot=SST−MMM, DHW=Σ HotSpot≥1 C over 12 wk; ≥4 possible, ≥8 severe)
+and the 4-month CFSv2 Outlook ([Eakin et al. 2018](https://www.frontiersin.org/journals/marine-science/articles/10.3389/fmars.2018.00057/full));
+OSTIA gap-free SST; Allen Coral Atlas [methods](https://allencoralatlas.com/methods/)
+(triggered baseline-vs-event brightening *detection*, not a forecast).
+
+## 4. How to run
 
 ```bash
 uv venv
@@ -62,244 +103,289 @@ uv pip install --python .venv/Scripts/python.exe rasterio lightgbm scikit-learn 
 python coral_bleaching_forecaster.py
 ```
 
-Outputs: `coral_bleaching_risk_forecast.tif`, `bleaching_evaluation_metrics.json`.
-
-## The 7 research extensions
-
-| # | Module | Run |
-|---|--------|-----|
-| 1 | Real labels: Reef Check + SST join + DHW baseline | `python data/join_reefcheck_cortad.py --demo` |
-| 2 | Learned SST downscaling (RCNN) | `python models/sst_downscale_rcnn.py --demo` |
-| 3 | SITS temporal encoder (Mamba/GRU) | `python models/sits_mamba.py --demo` |
-| 4 | SatMAE pretraining (+Prithvi option) | `python models/pretrain_satmae.py --demo` |
-| 5 | SSTODE physics-informed SST forecast | `python models/sstode_forecast.py --demo` |
-| 6 | Multivariate features + SHAP pruning | `python features/multivariate.py --demo` |
-| 7 | Severity/lead-time eval harness | `python eval/severity_leadtime.py --demo` |
-
-Wired into the main CLI: `--sst_model sstode`, `--multivariate`,
-`--eval_report`, `--labels_csv <join output>`, `--temporal sits`,
-`--stack_dir <dir>`, `--calibrate`.
-
-Also in the main path (no flags needed): DHW re-tuning grid (thresholds
-MMM+0.5/+1.0 × 6/12-week windows), Hobday MHW event/category features,
-Lyzenga depth-invariant indices (DII_23/24/34 via per-scene sand-ROI
-regression), and cross-domain transplants (coral GDD, CWSI normalization,
-days-above-30C, 7-day heating-rate + hot streaks, variance-protection
-windows, SPEI-style surplus, DLNM lags, light×heat dose). SITS head does
-masked-reconstruction pretraining + supervised fine-tuning
-(SITSMamba-style two-stage). LightGBM carries monotonicity priors
-(heat ↑, variance ↓). `--loro` runs leave-one-region-out quadrant CV.
-
-## Data sources
-
-Every input file and where it came from. Files already vendored in `data/`
-so runs are offline-capable; links are for provenance and re-download.
-
-- `data/ReefCheck_raw.csv` — raw Reef Check bleaching surveys, from the
-  Sully et al. (2019) analysis repo ([repo](https://github.com/InstituteForGlobalEcology/Coral-bleaching-a-global-analysis-of-the-past-two-decades),
-  [raw CSV](https://raw.githubusercontent.com/InstituteForGlobalEcology/Coral-bleaching-a-global-analysis-of-the-past-two-decades/master/Reef%20Check%20Data%20Raw.csv)).
-  Paper: Sully et al. 2019, *Nature Communications*,
-  [doi:10.1038/s41467-019-09238-2](https://doi.org/10.1038/s41467-019-09238-2).
-- `data/ReefCheck_CoRTAD.csv` — the same surveys joined to CoRTAD thermal
-  variables + annual SST rate
-  ([raw CSV](https://raw.githubusercontent.com/InstituteForGlobalEcology/Coral-bleaching-a-global-analysis-of-the-past-two-decades/master/Reef_Check_with_cortad_variables_with_annual_rate_of_SST_change.csv);
-  CoRTAD = NOAA Coral Reef Temperature Anomaly Database).
-- `data/gcbd_bleaching_environmental.csv` — Global Coral Bleaching Database,
-  BCO-DMO dataset 773466 v2 (van Woesik & Burkepile 2022, CC BY 4.0),
-  [dataset](https://www.bco-dmo.org/dataset/773466),
-  paper [doi:10.1038/s41597-022-01121-y](https://doi.org/10.1038/s41597-022-01121-y).
-- `data/pilot_stack/*.tif` — Sentinel-2 L2A windows (B2/B3/B4/B8, tile
-  51RWH, 2022-08-25 + 2022-09-29, Sekisei Lagoon box), cut from
-  [sentinel-s2-l2a-cogs](https://registry.opendata.aws/sentinel-2-l2a-cogs/)
-  via `pilot_sekisei.py`; scene search through
-  [Earth Search STAC](https://earth-search.aws.element84.com/v1/search).
-- `data/pilot_sst.csv` — JPL MUR SST v4.1 gap-free daily SST at
-  24.31N 123.71E, via CoastWatch ERDDAP
-  ([griddap](https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST41.html)),
-  MMM 29.98 C.
-- `sst_noaa_daily.csv` — not external: synthetic fallback SST the
-  forecaster writes when no `--sst_csv` is given.
-- Full GCBD via NCEI Accession 0228498 (33,244 records, 1963–2021),
-  [catalog entry](https://catalog.data.gov/dataset/global-coral-bleaching-database-ncei-accession-0228498)
-  — attempted, download flow blocked (see G2).
-- AIMS LTMP, eAtlas GeoNetwork, ALA BioCache, CoralWatch BioCollect,
-  Allen Atlas — attempted label/imagery pulls, all blocked (see G2).
-
-## Real-world benchmark (GCBD, n=4,219, `python eval/gcbd_benchmark.py`)
-
-Model vs DHW-only baseline on real bleaching outcomes: accuracy 0.71 vs
-0.31, ROC-AUC 0.86, per-class AP 0.89/0.75/0.76 — matching published
-absolute-temperature skill (0.884), with thermal-only features (no lat/lon).
-Leave-one-realm-out CV collapses to 0.46–0.65: skill does not transfer
-across basins. Within-basin training holds: Tropical Atlantic 0.68/0.84,
-Central Indo-Pacific 0.70/0.86, both well above baseline. Deployment rule:
-train per basin (or basin-calibrate), never one global model.
-
-## Pilot status
-
-Round 1 (Sekisei Lagoon, all real): 69 Reef Check labels, 2-date S2 stack,
-1,033-day MUR SST — model/ DHW baseline both 1.0 on 6 in-window sites;
-DHW baseline 0.681 on all labels; model ROC-AUC 0.534 (no in-window
-heatwave, so nothing to discriminate). Round 2 scouting (blocked on
-S2-era labels, 6 access attempts): BCO-DMO GCBD copy downloaded (4,219
-rows, 1980–2016, zero S2-era bleached rows); NCEI full-GCBD download flow
-JS/302-gated; figshare API search found no GCBD copy; Japan Reef Check
-ends 2015; CoralWatch absent from ALA biocache (dr17828 + dataset_name
-both 0 — data lives in BioCollect project store). Next, easiest first:
-AIMS LTMP 2022 in-water data via data.aims.gov.au; 2020 heatwave year as
-fallback; Allen Atlas layers via GEE asset; MOE Sites 1000 endpoint hunt.
-
-Full pipeline with everything on:
+Full pipeline (all flags):
 
 ```bash
 python data/join_reefcheck_cortad.py --demo
-python coral_bleaching_forecaster.py --sst_model sstode --multivariate --eval_report --labels_csv data/labels.csv --temporal sits --calibrate --loro --site_labels_csv data/demo_sites.csv
-python eval/gcbd_benchmark.py --drop-geo --out eval/gcbd_benchmark_nogeo.json
-python -m unittest tests.test_all7
+python coral_bleaching_forecaster.py --sst_model sstode --multivariate --eval_report --labels_csv data/labels.csv --temporal sits --calibrate --loro --site_labels_csv data/demo_sites.csv --prune_dead --downscale
+python eval/gcbd_benchmark.py --drop-geo --seeds 0,1,2 --out eval/gcbd_benchmark_nogeo.json
+python eval/gcbd_benchmark.py --seeds 0,1,2
+python -m pytest tests/test_all7.py -q
 ```
 
-## Project handoff — state, verification log, and every open gap
+CLI flags: `--sst_model sstode`, `--multivariate`, `--eval_report`,
+`--labels_csv`, `--temporal sits`, `--stack_dir`, `--calibrate`, `--loro`,
+`--site_labels_csv`, `--site_radius_px`, `--prune_dead` (R5 probe-prune of
+zero-variance/zero-gain features), `--downscale` (R3 patch-trained RCNN
+sharpening of the forecast DHW map), plus `--blue/--green/--red/--nir`
+`--sst_csv --mmm` for pilot runs. Benchmark flags: `--seeds` (sweep with
+CIs), `--max-blocks`, `--block-deg`, `--no-dedupe`, `--covariate` (R8
+external lead-time covariate CSV). Per-basin models apply a minimum-n rule
+(realms with n < 50 reported as skipped) with no CLI override.
+Every run is stamped into `runs/registry.jsonl` (see §2). Environment notes: `mamba_ssm` needs
+Linux+CUDA (GRU fallback shipped, G3); ACOLITE unavailable here — DOS +
+DII is the verified chain (G4); Prithvi path is a stub (G5); PowerShell
+may show exit 1 on passing unittest runs (stderr artifact — trust `OK`).
 
-Last verified: 15/15 tests pass (`python -m unittest tests.test_all7`).
-Synthetic headline numbers: ROC-AUC 0.947, accuracy 0.966, per-class AP
-0.926/0.859/0.965, calibration ECE 0.072 -> 0.030 (T=0.80), quadrant-LORO
-0.965 +/- 0.001. Real-data headline numbers (GCBD n=4,219, thermal-only):
-accuracy 0.71 vs DHW baseline 0.31, ROC-AUC 0.86, per-class AP
-0.89/0.75/0.76. Main script has 37 features
-(`FEATURE_NAMES`; pixel list `PIXEL_FEATURES`, thermal list
-`THERMAL_FEATURES`, shared assembler `pixel_block` used by training,
-site path, and forecast export).
+## 5. Benchmarks
 
-### Verified working (do not redo)
+GCBD numbers below are re-measured Nov 11 (R1–R10 build, project venv,
+3-seed sweep). Synthetic pipeline numbers are the Nov 9 state plus the new
+R2/R6 rows re-measured Nov 11. `--prune_dead` + `--downscale` variant
+(re-measured Nov 11): 21/37 features kept, model parity 0.965/0.947, DHW
+gain share 0.231 → 0.300, downscale val RMSE 0.076, site 0.4931 — pruning
+removes dead weight without losing skill. Test suite: 28 tests
+(15 pre-existing + 13 roadmap), 28/28 green Nov 11 on the project venv.
 
-- End-to-end runs: synthetic demo, real Sekisei pilot (S2 + MUR SST +
-  Reef Check labels), GCBD tabular benchmark, all CLI flags
-  (`--sst_model sstode`, `--multivariate`, `--eval_report`,
-  `--labels_csv`, `--temporal sits`, `--stack_dir`, `--calibrate`,
-  `--loro`, `--site_labels_csv`, `--site_radius_px`).
-- Determinism fixes kept: torch nets are built after `manual_seed`
-  (init-before-seed caused run-order-dependent results); SSTODE trains on
-  standardized series with one-step-ahead loss (rollout BPTT diverged);
-  SITS uses two-stage pretrain-then-finetune (joint MT loss fought itself);
-  NLL temperature fit uses an explicit softmax (operator-precedence bug
-  fixed); `load_stack` accepts >= 2 dates; LORO ROC skips folds missing a
-  class instead of crashing.
-- Data provenance: `data/ReefCheck_CoRTAD.csv` + `data/ReefCheck_raw.csv`
-  (GitHub, ~3 MB each), `data/gcbd_bleaching_environmental.csv` (BCO-DMO
-  dataset 773466, 4,219 rows), `data/pilot_stack/` (8 real S2 L2A COG
-  windows, tile 51RWH, 2022-08-25 + 2022-09-29, Sekisei box
-  lon 123.65-123.80 / lat 24.30-24.42), `data/pilot_sst.csv` (1,033 d MUR
-  SST at 24.31N 123.71E via coastwatch ERDDAP, MMM 29.98 C),
-  `data/pilot_labels.csv` (69 rows, Sekisei bbox + all bleached Japan
-  rows), `data/demo_sites.csv` (rule-consistent synthetic demo sites).
-- Earth Search STAC works with POST + full RFC3339 datetimes
-  (`https://earth-search.aws.element84.com/v1/search`); MUR SST via
-  `https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST41.csv`
-  (chunk yearly; single-point queries are reliable, multi-year single
-  queries drop); GeoNetwork POST search works
-  (`catalogue.eatlas.org.au/geonetwork/srv/api/search/records/_search`);
-  CoralWatch data resource UID is `dr17828` (BIE), BioCollect project
-  `9c55416c-f56a-4917-a65d-daadcb8f51f7`.
+### 5.1 Main synthetic pipeline (n_test = 24,000)
 
-### Open gaps (nothing omitted)
+| Metric | Value |
+|---|---|
+| Accuracy | 0.9655 |
+| ROC-AUC (ovr macro) | 0.9467 |
+| AP per class 0/1/2 (supports 4385/2465/17150) | 0.926 / 0.859 / 0.965 |
+| Confusion | [[4070,42,273],[59,2096,310],[67,78,17005]] |
+| Calibration T / NLL / ECE | 0.7628, 0.2202 → 0.203, 0.0717 → 0.0299 |
+| Quadrant-LORO acc / ROC | 0.9652 ± 0.0011 / 0.9459 |
+| SITS temporal head vs LightGBM | 0.965 vs 0.9655 (tie) |
+| Site-supervised path (10 sites, 1210 px) | acc 0.4904, rule-head agreement 0.5372 |
+| Top gain features (dhw_gain_share 0.231) | sst_mean, dhw, mhw_events, sst_max, ndvi_sub |
+| Forecast map at DHW 5.60 | 100% class 2 (saturated demo regime — expected, not a bug) |
+| Severity/lead-time ECE | 0.0294; hit_rate 0.978–1.0 at leads 15–30 d |
+| R2 baselines, same test pixels (re-measured Nov 11) | DHW rule 0.6137, redefined-DHW **0.7496**, majority 0.7146, model 0.965 |
+| Calibration Brier (synthetic) | 0.0274, BSS **+0.82** vs climatology |
 
-- G1 Cross-basin transfer (biggest). LORO-by-realm 0.46 acc / 0.65 AUC
-  vs stratified 0.71 / 0.86. Root cause per literature: thermal-gap /
-  shifting baselines, not code. Mitigation shipped: per-basin deployment
-  rule + LORO harness. Real fix needs: AIMS 2022 pull, or hierarchical
-  partial pooling (not implemented — LightGBM can't do it; would need a
-  mixed model), or domain adaptation. Do NOT claim global skill.
-- G2 S2 heatwave pilot with contemporaneous labels (blocked, 6 failed
-  attempts documented): BCO-DMO GCBD copy ends 2016 (zero S2-era bleached
-  rows); NCEI full GCBD (35k records, accession 0228498) download flow is
-  JS/302-gated (`.../archive/accession/download/228498` fails);
-  figshare API search found no GCBD copy; Japan Reef Check ends 2015;
-  CoralWatch returns 0 records under `dr17828` and `dataset_name`
-  (data lives in the BioCollect project store — needs project-API work);
-  Allen Atlas layers path unverified (Next.js app, likely GEE asset);
-  MOE Sites 1000 endpoint unverified; AIMS dashboard is a JS shell with
-  no reachable data API and the 2021/22 status PDF is sector-level prose
-  with no reef tables. Ranked next: AIMS LTMP 2022 via data.aims.gov.au
-  (needs navigation/request), 2020 heatwave fallback, Allen Atlas via
-  GEE (needs auth), MOE endpoint hunt.
-- G3 mamba-ssm uninstallable here: no Windows wheels, needs Linux +
-  CUDA, source build fails (`bare_metal_version` NameError). GRU +
-  Transformer backbones verified; `mamba_ssm` import stays optional with
-  GRU fallback + warning. Revisit only on a Linux+CUDA machine.
-- G4 ACOLITE uninstallable here: not on PyPI; GitHub source install
-  hung 30+ min and was killed; venv verified healthy after. DOS +
-  Lyzenga DII is the verified aquatic chain. Revisit with conda or a
-  Linux box if a BOA comparison is wanted.
-- G5 Prithvi-EO-2.0 path is a stub (`load_prithvi` raises informative
-  error unless terratorch is configured). SatMAE local pretraining is
-  real and tested.
-- G6 SITS demo margin is thin (acc 0.54 on toy data; recon verified
-  below variance). Real fix = real SITS labels (blocked by G2).
-- G7 Pilot validation caveat: Sekisei survey labels are 2003-2004, S2
-  scenes 2022 — temporal mismatch, so site checks are consistency
-  checks, not validation. The 6 in-window sites were all observed 0.
-- G8 Class imbalance: real pilot is 96% no-stress; synthetic Watch class
-  is 10%. Any future heatwave run must check per-class recall, not just
-  accuracy.
-- G9 Research items NOT yet implemented (all sourced in session):
-  DLinear/PatchTST/xLSTM SST heads, RT-consistency loss off the Lee
-  model, delta-DII change-detection head, BAA-tier ordinal targets,
-  INT8-quantization delta (unmeasured), hierarchical partial pooling,
-  diurnal Himawari SST feature, PACE water-quality covariates, NCRMP
-  US-reef eval, DESIS/SkySat licensing + quotas, GCRMN 2025 raw endpoint,
-  MOE/COrMoC endpoint, JGR/GRL/TGRS bleaching landmark papers (could not
-  verify landmark claims — do not cite any).
-- G10 Metrics/outputs are overwritten every run (`coral_bleaching_risk
-  _forecast.tif`, `bleaching_evaluation_metrics.json`,
-  `forecast_quicklook.png`, `eval/reliability.png`). Copy them aside
-  before comparing runs.
-- G11 `pilot_sekisei.py` is fetch-only; the pilot run itself is the
-  forecaster CLI with `--blue/--green/--red/--nir` + `--sst_csv` +
-  `--mmm` + `--stack_dir` + `--labels_csv` (see Quickstart). eAtlas
-  nextcloud sharealias downloads do NOT resolve to direct links
-  (`/download` variants 404) — do not chase further without the alias
-  API.
-- G12 Environment: project-local `.venv` (Python 3.11) has torch 2.15
-  CPU, rasterio, lightgbm, sklearn, geopandas, xarray, pdfplumber.
-  Reinstall pattern that worked: `uv pip install --python
-  .\.venv\Scripts\python.exe <pkgs>` (+ torch CPU index URL). No
-  `.gitignore` is committed (policy) — always `git add` named files,
-  never `git add -A`, to keep `.venv/` out. PowerShell shows exit 1 on
-  unittest runs even when tests pass (stderr capture artifact) — trust
-  the `OK` line, not the exit code.
+### 5.2 Real GCBD benchmark (re-measured Nov 11, R1–R10 build)
 
-### Resume commands
+Seed sweep (3 seeds) + dedupe: 106 exact-duplicate rows dropped (4,219 →
+4,113). With-geo honest splits: grouped-site **0.7223**, block **0.6895 ±
+0.3506**, temporal **0.5071** — geo features lift block transfer (0.69 vs
+0.58 thermal-only) while adding nothing to stratified accuracy, the classic
+leakage-adjacent signature; Latitude_Degrees still dominates gain (17,639).
+
+| Setup | Acc | ROC-AUC | AP 0/1/2 | DHW base | Majority base | LORO | ECE (T, cross-fit) | BSS |
+|---|---|---|---|---|---|---|---|---|
+| Thermal-only (39 feats, `--drop-geo`) | 0.6958 ± 0.0071 | 0.8499 (sweep 0.8538) | 0.900/0.715/0.741 | 0.3324 | 0.4674 | 0.4924 ± 0.1555 | 0.1234 (1.915 ± 0.076, NLL 0.717 → 0.620) | +0.241 vs climatology |
+| With-geo (41 feats) | 0.6987 ± 0.0088 | 0.8537 (sweep 0.8570) | 0.890/0.723/0.744 | 0.3324 | 0.4674 | 0.5055 ± 0.1104 | 0.1206 (1.948 ± 0.073, NLL 0.720 → 0.616) | +0.249 vs climatology |
+
+New honest splits (thermal-only): grouped-site holdout **0.7036**
+(965 test rows, 675 sites — holds up); spatial-block CV **0.5833 ± 0.4011**
+(25 sampled of 396 occupied 1° cells — very noisy, as expected);
+forward-temporal CV **0.4919** (3 folds). Severity cut: DHW≥4 0.6964
+(n=494), DHW≥8 0.7203 (n=261). Top gain: Temperature_Mean, TSA_Mean,
+Depth_m. Feature parity: 0 of 30 deployment thermal names exist in GCBD
+(raw CoRTAD columns instead — expected, documented).
+
+### 5.3 Realm leave-one-out (thermal-only; ROC null where a fold lacks a class)
+
+| Realm | n | LORO acc | LORO ROC | Per-basin acc |
+|---|---|---|---|---|
+| Central Indo-Pacific | 1214 | 0.4498 | 0.6579 | 0.7039 |
+| Eastern Indo-Pacific | 102 | 0.5588 | null | 0.3077 |
+| Temperate Australasia | 7 | 0.1429 | null | skipped (n<50) |
+| Temperate Northern Atlantic | 5 | skipped (single-class) | null | skipped (n<50) |
+| Temperate Northern Pacific | 188 | 0.6383 | 0.7099 | 0.6809 |
+| Tropical Atlantic | 2253 | 0.4794 | 0.5941 | 0.6454 |
+| Tropical Eastern Pacific | 51 | 0.6078 | null | 0.3077 |
+| Western Indo-Pacific | 293 | 0.5700 | null | 0.7432 |
+
+LORO mean acc 0.4924 ± 0.1555, mean ROC 0.654 (3/7 folds). TNA (n=5) was
+always present (4,214 + 5 = 4,219) but silently skipped by LORO — now
+reported as skipped instead. Per-basin models hold 0.65–0.74 where n is
+adequate (CIP/TNP/TAtl/WIP) and collapse at n≈50–100 (EIP/TEP 0.31) —
+hence train-per-basin *with a minimum-n rule*.
+
+### 5.4 Per-module benchmark (the 7 extensions + main; demo gates)
+
+| # | Module | Gate (demo asserts) | Nov 9 result | Limitation |
+|---|---|---|---|---|
+| 1 | Real labels join (`data/join_reefcheck_cortad.py`) | DHW baseline runs, regional scores | demo baseline 0.233 (n=60 toy) | severity/100 scale assumption; single global SST series |
+| 2 | RCNN downscale (`models/sst_downscale_rcnn.py`) | rmse_rcnn < bilinear | pass | trains on ONE coarse/fine pair; synthetic depth/mask; unwired into CLI |
+| 3 | SITS encoder (`models/sits_mamba.py`) | acc > 0.5, recon < var | acc ~0.54 (thin) | mamba_ssm uninstallable here; no val early-stop; HGB fallback flattens time |
+| 4 | SatMAE (`models/pretrain_satmae.py`) | mse < var | pass | loss over ALL patches incl. visible; no encoder.encode for classifier; unseeded masking |
+| 5 | SSTODE (`models/sstode_forecast.py`) | rmse < persistence | pass | diffusion term is mislabeled damping; train/infer seasonal-phase mismatch; no uncertainty |
+| 6 | Multivariate (`features/multivariate.py`) | kept incl. freq_above_mmm1_12w | pass | fillna(0)/min_periods=1 biases early windows; optical → global mean/p10 only |
+| 7 | Severity/lead-time (`eval/severity_leadtime.py`) | by_lead len 8 | pass (8-row demo; 22-row full) | ECE on P(severe) only; temp fit on test split; silent null-AUC folds |
+| — | Main forecaster | 28/28 `tests/test_all7.py` | 28/28 OK Nov 11 (project venv, 313 s) | roadmap tests pin redefined-DHW tiers, nulls, cross-fit determinism, BSS=1 on perfect, prune-mask width, block patches, registry |
+
+### 5.5 Pilot Sekisei (all real, n = 69 labels)
+
+Model and DHW baseline both 1.0 on the 6 in-window sites; DHW 0.681 on
+all labels; model ROC-AUC 0.534 — no in-window heatwave, so nothing to
+discriminate. 96% no-stress imbalance; 2003–2004 labels vs 2022 imagery.
+
+### 5.6 How to read these numbers (honest-CV warning)
+
+Random-split 0.71 overstates skill vs realm-LORO ~0.47. Independent work
+(Mestry 2026, EarthArXiv 15638: pooled RF R² 0.688 random → 0.53 new
+sites → 0.18 1-deg blocks → 0.02 10-deg blocks; ReefCheck ~34.5%
+duplicates) shows why: always report site-grouped + spatial-block +
+forward-temporal CV beside stratified, dedupe substrate rows to sampling
+events, sweep seeds for CIs, and keep ranking-severe-events AUC (~0.73 at
+5-deg blocks) as the transfer metric.
+
+## 6. Research-backed improvements (ranked)
+
+Each item: what to change, why (literature), expected gain, effort.
+
+- **R1 Honest validation first (M).** Add site-grouped + spatial-block
+  (blockCV / Roberts–Valavi) + forward-temporal CV; dedupe ReefCheck
+  substrate rows to sampling events; seed sweeps with CIs. Why: Mestry
+  2026 ([EarthArXiv 15638](https://eartharxiv.org/repository/view/15638),
+  [data](https://doi.org/10.5281/zenodo.23511976)) shows random-split
+  skill collapsing under honest splits. Gain: credible numbers; severe
+  ranking keeps ~0.73 AUC at 5-deg blocks.
+- **R2 Harder baselines (S).** Add redefined-DHW (0.4 C cutoff, 11-wk
+  window, threshold 3 DHW; +~70% global skill,
+  [Coral Reefs 2024](https://doi.org/10.1007/s00338-024-02512-w)) plus
+  persistence / damped-persistence / climatology nulls (Brier-skill
+  reference). Gain: stops beating a strawman; thermal-gap work
+  ([Frontiers 2026](https://www.frontiersin.org/journals/marine-science/articles/10.3389/fmars.2026.1835611/full))
+  shows standard DHW AUC falls to ~0.57 in the hottest seas.
+- **R3 Wire real downscaling (M–L).** Fix RCNN `fit()` single-pair
+  overfit → patch/val split, real bathymetry + reef mask, ablate the
+  extremes weight (2.0/q=0.9), wire into the forecaster path. Why:
+  residual-corrective U-Net downscaling ([arXiv 2608.10022](https://arxiv.org/abs/2608.10022v1))
+  and 250 m downscaled DHW ([PeerJ 21269](https://peerj.com/articles/21269))
+  improve bleaching prediction where 5 km DHW is flat.
+- **R4 Fix + ablate the SST forecast head (L).** Repair the diffusion
+  term (currently −1st-difference mislabeled as Laplacian), unify the
+  train/infer seasonal phase, add multi-horizon loss + NLL uncertainty;
+  order baselines persistence → linear → U-Net → ConvLSTM →
+  hybrid U-Net+ConvLSTM → SSTODE-style ODE
+  ([SSTODE](https://arxiv.org/abs/2511.05629)). Target the 6-week Miami
+  XGBoost horizon ([doi:10.1088/2515-7620/ae2570](https://doi.org/10.1088/2515-7620/ae2570),
+  ~1-week tolerance) and 4-month Outlook horizon.
+- **R5 Feature hygiene + parity (M).** Per-date SST windowing (today one
+  global `therm["dhw"]` is reused for all dates), proper short-window
+  guards (replace fillna(0)/min_periods=1), drop dead 0-gain transplant
+  features, and validate the actual deployment 37 (benchmark uses raw
+  CoRTAD columns, not the 37). Gain: removes bias, aligns offline/online.
+- **R6 Calibration overhaul (S–M).** Per-class (or Dirichlet) temperature
+  with cross-fit, reliability diagrams + Brier/BSS vs persistence
+  (ACCESS-S1 practice,
+  [Front. Mar. Sci. 2021](https://www.frontiersin.org/articles/10.3389/fmars.2021.687833/full));
+  fix GCBD ECE ~0.10–0.11 overconfidence (T≈1.77) vs synthetic 0.03.
+- **R7 SITS for gappy series (L).** ALISE-style alignment for irregular /
+  cloud-gappy SITS ([arXiv 2407.08448](https://arxiv.org/pdf/2407.08448))
+  + Mamba head ([SITSMamba](https://github.com/XiaoleiQinn/SITSMamba)),
+  masked-only loss, seeded masking, val early-stop — always vs a
+  from-scratch UNet (MAE pretraining can lose on dense tasks).
+- **R8 Per-basin models + outlook covariate (M).** Train per basin, drop
+  geo coordinates (leakage-adjacent: Latitude_Degrees gain 18395 adds
+  zero accuracy), add CFSv2/Outlook or short-range forecast SST as a
+  lead-time feature; plot skill-vs-lead × severity (DHW≥4 vs ≥8).
+- **R9 Atlas-style pilot redo (M).** Warning-triggered biweekly
+  baseline-vs-2wk-post median brightening with QA60/SCL masking (Allen
+  Atlas design); fix the 2003–04 vs 2022 mismatch; handle 96% imbalance.
+  Shipped Nov 11: retry-hardened COG fetch (backoff 5/10/20 s), label
+  `balance_report` with inverse-frequency weights, pilot runs recorded in
+  the registry. First credible real-site number lives here.
+- **R10 Test/registry hardening (S).** Pin GCBD 0.71/0.86 + ECE/LORO +
+  byte-identical determinism, rule-label tiers, `load_stack` parsing,
+  export/CLI flags, stronger-than-trivial gates. Shipped Nov 11: 13 roadmap
+  tests (28/28 green) plus `eval/run_registry.py` stamping
+  run-id/seed/git-hash/argv into every metrics JSON and `runs/registry.jsonl`.
+
+Deferred with reason: GNN / CNN-LSTM / PINN bleaching heads — no credible
+peer-reviewed skill numbers found (2022–2026 hits were non-peer-reviewed
+pages without DOIs/data); revisit only after an XGBoost+blocked-CV
+baseline exists, on dense time series. Foundation models (Prithvi-WxC,
+SatMAE, Chronos/Lag-Llama): reliable SST only to ~6–12 h / ~7 d
+([arXiv 2409.13598](http://arxiv.org/html/2409.13598v1),
+[Bustos-Usta 2025](https://www.mdpi.com/2072-4292/17/3/517)) — future SST
+feature providers, not bleaching predictors.
+
+## 7. Open gaps (nothing omitted)
+
+G1 Cross-basin transfer (biggest): LORO-by-realm 0.46/0.65 vs stratified
+0.71/0.86 — thermal-gap / shifting baselines, not code. Shipped: per-basin
+rule + LORO harness. Real fix: AIMS 2022 pull, hierarchical partial
+pooling (needs a mixed model — LightGBM can't), or domain adaptation.
+Do NOT claim global skill.
+G2 S2 heatwave pilot with contemporaneous labels (blocked, 6 failed
+attempts): BCO-DMO GCBD ends 2016; NCEI full GCBD (accession 0228498)
+JS/302-gated; figshare has no copy; Japan ReefCheck ends 2015; CoralWatch
+lives in the BioCollect project store (needs project-API work); Allen
+Atlas layers unverified (likely GEE asset); AIMS dashboard is a JS shell.
+Ranked next: AIMS LTMP 2022 via data.aims.gov.au, 2020 heatwave fallback,
+Allen Atlas via GEE (needs auth), MOE endpoint hunt.
+G3 mamba-ssm uninstallable here (no Windows wheels; source build fails).
+GRU+Transformer verified; `mamba_ssm` stays optional with fallback.
+G4 ACOLITE uninstallable here (not on PyPI; source install hung 30+ min).
+DOS + DII is the verified chain.
+G5 Prithvi-EO-2.0 path is a stub (`load_prithvi` raises unless terratorch
+configured). Local SatMAE pretraining is real and tested.
+G6 SITS demo margin thin (acc ~0.54 toy). Real fix = real SITS labels (G2).
+G7 Pilot temporal mismatch (labels 2003–2004 vs scenes 2022) — consistency
+checks, not validation.
+G8 Class imbalance (pilot 96% no-stress; synthetic Watch 10%) — check
+per-class recall, not accuracy.
+G9 Research items not implemented: DLinear/PatchTST/xLSTM SST heads,
+RT-consistency loss, delta-DII head, BAA-tier ordinal targets, INT8 delta
+(unmeasured), hierarchical pooling, Himawari diurnal SST, PACE covariates,
+NCRMP eval, DESIS/SkySat licensing, GCRMN 2025 / MOE endpoints, JGR/GRL
+landmarks (unverifiable — do not cite).
+G10 Outputs overwritten every run — mitigated Nov 11: run-id/seed/hash/argv
+are stamped into each metrics JSON and logged to `runs/registry.jsonl`, but
+the .tif/.png files themselves are still overwritten, so copy them aside
+for head-to-head map comparisons.
+G11 `pilot_sekisei.py` is fetch-only; pilot runs go through the forecaster
+CLI. eAtlas sharealias `/download` links 404 — do not chase further.
+G12 Environment: project-local `.venv` (Python 3.11, torch 2.15 CPU,
+rasterio, lightgbm, sklearn, geopandas, xarray). Reinstall:
+`uv pip install --python .\.venv\Scripts\python.exe <pkgs>`. No
+`.gitignore` committed (policy) — `git add` named files only, never
+`git add -A`. PowerShell exit-1-on-pass is a stderr artifact.
+New audit gaps (Nov 11): N1 rule-label circularity (synthetic skill is a
+smoke test); N2 single global DHW reused for all dates in
+`build_temporal_dataset`; N3 SSTODE train/infer seasonal-phase mismatch;
+N4 several transplant gains exactly 0.0 (dead features shipped); N5
+temperature/ECE fit on the test split (optimistic); N6 `sst_noaa_daily.csv`
+name implies observations, content is synthetic.
+
+## 8. Resume guide
 
 ```bash
-# fastest re-verification (13-15 min, mostly torch demos)
-.\.venv\Scripts\python.exe -m unittest tests.test_all7
+# fastest re-verification (~1 min here; 13–15 min with torch demos on full env)
+python -m pytest tests/test_all7.py -q
 # full synthetic run, all flags
-.\.venv\Scripts\python.exe coral_bleaching_forecaster.py --temporal sits --calibrate --eval_report --loro --site_labels_csv data/demo_sites.csv
+python coral_bleaching_forecaster.py --temporal sits --calibrate --eval_report --loro --site_labels_csv data/demo_sites.csv
 # real-data benchmark (thermal-only + with-geo comparison)
-.\.venv\Scripts\python.exe eval/gcbd_benchmark.py --drop-geo --out eval/gcbd_benchmark_nogeo.json
-.\.venv\Scripts\python.exe eval/gcbd_benchmark.py
+python eval/gcbd_benchmark.py --drop-geo --out eval/gcbd_benchmark_nogeo.json
+python eval/gcbd_benchmark.py
 ```
 
-### Session log — 2026-11-09 (resume, verify, benchmark, push)
+Project log: Nov 8 built 41 files + 13 probes, 15/15 tests, metrics above,
+committed `d924ea5` (no remote yet), 12 gaps logged. Nov 9 pushed to
+CoralCast main (10 commits, 40 files, in sync), README data-sources
+`f0298cc`, freed ~1.07 GB (`.venv`), layered commits around pilot-tif 408
+timeouts. Nov 11 built the full R1–R10 roadmap (honest splits, harder
+baselines, RCNN/SSTODE/SITS rework, feature hygiene, cross-fit calibration,
+per-basin models, pilot hardening, 13 roadmap tests + run registry),
+re-measured all numbers above, 28/28 tests green. Next session: re-run the
+fastest line above, then pick the top unblocked item that still needs data
+access (AIMS 2022 pull for G2, or train-per-basin deployment wiring for R8).
 
-- Re-verified from scratch: `tests.test_all7` 15/15 OK (166 s).
-- GCBD thermal-only (`--drop-geo`): model acc 0.71 vs DHW baseline
-  0.3118, LORO mean acc 0.4757. Output byte-identical to committed
-  `eval/gcbd_benchmark_nogeo.json` (deterministic).
-- GCBD with-geo: model acc 0.709 vs baseline 0.3118, LORO 0.4645.
-  Geo features add nothing — thermal-only is the deployable path.
-- Full synthetic run (all flags): ROC-AUC 0.947, acc 0.965,
-  SITS 0.965 vs LightGBM 0.965, calibration T=0.7628
-  (ECE 0.0717 -> 0.0299), quadrant-LORO 0.9652 +/- 0.0011,
-  site-supervised demo acc 0.4904 (n=1,210 px / 10 synthetic sites),
-  severity/lead-time ECE 0.0294 over 24 lead x region rows.
-  Synthetic scene sits under heat (DHW 5.60) so the forecast map is
-  100% class 2 — expected for the demo, not a bug.
-- Remote set to `https://github.com/gururajrao1/CoralCast` (origin).
-- Upgrades deliberately deferred (see G9): DLinear/PatchTST/xLSTM SST
-  heads, RT-consistency loss, delta-DII head, BAA-tier ordinal targets,
-  INT8 quantization, hierarchical partial pooling, Himawari diurnal
-  SST, PACE covariates, NCRMP eval, GEE/GCRMN/MOE data pulls. G1 (cross-
-  basin transfer) and G2 (S2-era labels) remain the two load-bearing
-  gaps; everything else needs data access or a Linux+CUDA box, not
-  more code in this repo state.
+## 9. References
+
+- NOAA CRW 5km v3.1 DHW tutorial; CRW thermal history; R `dhw` package
+  (v3.1 methods); NOAA CRW 4-month Outlook (CFSv2).
+- Eakin et al. 2018, Front. Mar. Sci. (Outlook system).
+- CoRTAD v6 (NCEI product page + accession NCEI-CoRTADv6, 1982–2022).
+- Allen Coral Atlas methods + bleaching method PDF (v1).
+- Univ. Miami XGBoost early-warning, Environ. Res. Commun. 2025,
+  doi:10.1088/2515-7620/ae2570 (6-week horizon).
+- Mestry 2026, EarthArXiv 15638 + Zenodo 10.5281/zenodo.23511976
+  (honest-CV collapse; ReefCheck duplicates).
+- Coral Reefs 2024, doi:10.1007/s00338-024-02512-w (redefined DHW, +70%).
+- Frontiers Mar. Sci. 2026 thermal-gap paper (DHW AUC → 0.57 hottest seas).
+- Bustos-Usta et al. 2025, Remote Sens. 17(3):517 (Chronos SST ~7 d).
+- Prithvi-WxC, arXiv 2409.13598; SSTODE, arXiv 2511.05629.
+- PeerJ 21269 (250 m downscaled DHW); residual U-Net downscaling,
+  arXiv 2608.10022.
+- SatMAE (NeurIPS 2022); SITSMamba; ALISE 2024; SatMamba survey.
+- Roberts et al. 2017 / Valavi blockCV (spatial CV); ACCESS-S1
+  Front. Mar. Sci. 2021 (reliability/Brier practice).
+- Sully et al. 2019, Nat. Commun. (ReefCheck analysis); van Woesik &
+  Burkepile 2022, Sci. Data (GCBD).
