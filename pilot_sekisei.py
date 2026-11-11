@@ -62,10 +62,21 @@ def build_labels() -> pd.DataFrame:
     out.to_csv("data/pilot_labels.csv", index=False)
     print(f"pilot labels: {len(out)} rows, "
           f"classes={out['label'].value_counts().to_dict()}")
+    balance_report(out)
+    try:
+        from eval.run_registry import record as _record
+        _record({"run": {"argv": ["pilot build_labels"],
+                         "seed": None,
+                         "note": "pilot labels (offline part)"},
+                 "n_labels": int(len(out))}, "pilot_labels")
+    except Exception as e:
+        print(f"registry skipped ({e})")
     return out
 
 
-def download_stack() -> None:
+def download_stack(retries: int = 3) -> None:
+    """R9: retry-hardened COG window fetch (backoff 5/10/20 s), skip-existing."""
+    import time
     OUT_STACK.mkdir(parents=True, exist_ok=True)
     for datestr, (scene, ym) in SCENES.items():
         for cog, short in BANDS.items():
@@ -75,20 +86,65 @@ def download_stack() -> None:
             if out.exists():
                 print(f"exists: {out}")
                 continue
-            with rasterio.open(f"/vsicurl/{href}") as src:
-                b = transform_bounds("EPSG:4326", src.crs, *WIN)
-                w = from_bounds(*b, src.transform)
-                w = w.round_offsets().round_lengths()
-                w = w.intersection(
-                    from_bounds(*src.bounds, src.transform))
-                arr = src.read(1, window=w)
-                prof = dict(src.profile, height=w.height, width=w.width,
-                            transform=rasterio.windows.transform(w,
-                                                                 src.transform),
-                            compress="deflate", tiled=True)
-            with rasterio.open(out, "w", **prof) as dst:
-                dst.write(arr, 1)
-            print(f"wrote {out} {arr.shape}")
+            for attempt in range(retries):
+                try:
+                    with rasterio.open(f"/vsicurl/{href}") as src:
+                        b = transform_bounds("EPSG:4326", src.crs, *WIN)
+                        w = from_bounds(*b, src.transform)
+                        w = w.round_offsets().round_lengths()
+                        w = w.intersection(
+                            from_bounds(*src.bounds, src.transform))
+                        arr = src.read(1, window=w)
+                        prof = dict(src.profile, height=w.height,
+                                    width=w.width,
+                                    transform=rasterio.windows.transform(
+                                        w, src.transform),
+                                    compress="deflate", tiled=True)
+                    with rasterio.open(out, "w", **prof) as dst:
+                        dst.write(arr, 1)
+                    print(f"wrote {out} {arr.shape}")
+                    break
+                except Exception as e:
+                    print(f"retry {attempt + 1}/{retries} {out}: {e}")
+                    time.sleep(5 * (attempt + 1))
+            else:
+                raise RuntimeError(f"download failed after {retries}: {out}")
+
+
+def balance_report(labels: "pd.DataFrame") -> dict:
+    """R9: class counts + suggested inverse-frequency weights.
+
+    The pilot is ~96% no-stress; accuracy alone hides minority collapse,
+    so every pilot run should print this alongside per-class recall.
+    """
+    counts = labels["label"].value_counts().sort_index()
+    total = float(counts.sum())
+    weights = {int(c): round(total / (len(counts) * n), 3)
+               for c, n in counts.items()}
+    rep = {"counts": {int(c): int(n) for c, n in counts.items()},
+           "minority_fraction": round(float(counts.min() / total), 4),
+           "suggested_class_weight": weights}
+    print(rep)
+    return rep
+
+
+def bleaching_change_map(baseline: np.ndarray, event: np.ndarray,
+                         thresh: float = 0.03) -> dict:
+    """R9 Atlas-style change detection: baseline-median vs event brightening.
+
+    Flags pixels whose reflectance brightened by >= thresh (coral
+    brightening = likely bleaching). Pure numpy; baseline and event must
+    be co-registered arrays over the same grid.
+    """
+    baseline = np.asarray(baseline, dtype=float)
+    event = np.asarray(event, dtype=float)
+    delta = event - baseline
+    flagged = delta >= thresh
+    return {"n_pixels": int(baseline.size),
+            "n_flagged": int(flagged.sum()),
+            "fraction_flagged": round(float(flagged.mean()), 4),
+            "mean_delta": round(float(np.nanmean(delta)), 5),
+            "threshold": float(thresh)}
 
 
 def fetch_sst() -> float:

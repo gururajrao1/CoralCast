@@ -31,20 +31,22 @@ def build_multivariate_features(sst: pd.DataFrame, mmm: float,
     v = pd.to_numeric(s["sst_c"], errors="coerce").to_numpy(dtype=float)
     anom = v - mmm
     hot = np.clip(anom - 1.0, 0, None)          # HotSpot vs MMM+1
+    # R5: windows require >=50% coverage (NaN until then) instead of
+    # min_periods=1 zeros that biased early-series rows downward.
     feats: dict[str, np.ndarray] = {
         "sst": v,
         "ssta": anom,
         "hotspot": np.clip(anom, 0, None),
         "hotspot_inst": hot,
-        "ssta_4w_mean": pd.Series(anom).rolling(28, min_periods=1).mean()
+        "ssta_4w_mean": pd.Series(anom).rolling(28, min_periods=14).mean()
         .to_numpy(),
-        "ssta_12w_var": pd.Series(anom).rolling(84, min_periods=7).var()
-        .fillna(0).to_numpy(),
+        "ssta_12w_var": pd.Series(anom).rolling(84, min_periods=42).var()
+        .to_numpy(),
         "freq_above_mmm1_12w": pd.Series((v >= mmm + 1.0).astype(float))
-        .rolling(84, min_periods=1).mean().to_numpy(),
-        "sst_rate_4w": pd.Series(v).diff(28).fillna(0).to_numpy() / 28.0,
-        "enso12": pd.Series(anom).rolling(365, min_periods=30).mean()
-        .fillna(0).to_numpy(),
+        .rolling(84, min_periods=42).mean().to_numpy(),
+        "sst_rate_4w": pd.Series(v).diff(28).to_numpy() / 28.0,
+        "enso12": pd.Series(anom).rolling(365, min_periods=183).mean()
+        .to_numpy(),
         "doy_sin": np.sin(2 * np.pi * np.arange(len(v)) / 365.25),
         "doy_cos": np.cos(2 * np.pi * np.arange(len(v)) / 365.25),
         "lat": np.full(len(v), lat),
@@ -65,9 +67,19 @@ def build_multivariate_features(sst: pd.DataFrame, mmm: float,
 
 def prune_features(X: pd.DataFrame, y: np.ndarray, top_k: int = 12,
                    seed: int = 0) -> list[str]:
-    """Rank columns by SHAP (if installed) else LightGBM gain; top_k names."""
+    """Rank columns by SHAP (if installed) else LightGBM gain; top_k names.
+
+    R5: rows whose windowed features are still NaN (short series start)
+    are dropped instead of zero-filled, so imputation cannot invent
+    calm early windows.
+    """
     import lightgbm as lgb
-    X = X.fillna(0)
+    keep_rows = X.notna().all(axis=1).to_numpy()
+    if keep_rows.sum() < 10:  # degenerate: fall back to zero-fill
+        X = X.fillna(0)
+    else:
+        X = X.loc[keep_rows].reset_index(drop=True)
+        y = np.asarray(y)[keep_rows]
     try:
         import shap  # optional
         model = lgb.LGBMClassifier(n_estimators=100, verbose=-1,

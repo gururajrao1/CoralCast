@@ -342,12 +342,59 @@ def monotone_constraints() -> list[int]:
             for f in FEATURE_NAMES]
 
 
+def select_features(X: np.ndarray, y: np.ndarray, seed: int = RNG_SEED,
+                    n_estimators: int = 100) -> list[int]:
+    """R5: keep columns with nonzero variance AND nonzero LightGBM gain.
+
+    A quick probe fit finds dead transplants (e.g. days_above_30 on cool
+    scenes); the caller slices every downstream block with the returned
+    indices. Never drops the DHW column.
+    """
+    import lightgbm as lgb
+    X = np.asarray(X, dtype=np.float64)
+    y = np.asarray(y)
+    keep = [i for i in range(X.shape[1])
+            if float(np.var(X[:, i])) > 0.0]
+    probe = lgb.LGBMClassifier(objective="multiclass", num_class=N_CLASSES,
+                               n_estimators=n_estimators, learning_rate=0.05,
+                               num_leaves=31, min_child_samples=20,
+                               verbose=-1, random_state=seed)
+    probe.fit(X[:, keep], y)
+    gain = probe.booster_.feature_importance(importance_type="gain")
+    keep = [i for i, g in zip(keep, gain) if float(g) > 0.0]
+    if DHW_COL not in keep:
+        keep = sorted(keep + [DHW_COL])
+    return keep
+
+
 def compute_dhw_threshold(sst: np.ndarray, mmm: float, offset: float,
                           window_days: int) -> float:
     """DHW with HotSpot threshold MMM+offset over a custom window (C-weeks)."""
     sst = np.asarray(sst, dtype=np.float64)[-window_days:]
     hotspot = np.where(sst >= mmm + offset, sst - mmm, 0.0)
     return float(hotspot.sum() / 7.0)
+
+
+# R2: redefined DHW (Coral Reefs 2024): HotSpot cutoff MMM+0.4 C over an
+# 11-week (77 d) window, bleaching threshold 3 C-weeks. Reported +~70%
+# global skill vs the standard 1.0 C / 12-wk / >=4 definition, so it is
+# the harder, fairer baseline every model must beat alongside persistence.
+REDEFINED_OFFSET = 0.4
+REDEFINED_WINDOW_DAYS = 77
+REDEFINED_THRESHOLD = 3.0
+
+
+def redefined_dhw(sst: np.ndarray, mmm: float) -> float:
+    """Redefined DHW (0.4 C cutoff, 77-day window) in C-weeks."""
+    return compute_dhw_threshold(np.asarray(sst, dtype=np.float64), mmm,
+                                 REDEFINED_OFFSET, REDEFINED_WINDOW_DAYS)
+
+
+def redefined_dhw_predict(dhw: np.ndarray) -> np.ndarray:
+    """Redefined tiers: >=2x threshold severe (2), >=threshold watch (1)."""
+    dhw = np.asarray(dhw, dtype=float)
+    return np.where(dhw >= 2 * REDEFINED_THRESHOLD, 2,
+                    np.where(dhw >= REDEFINED_THRESHOLD, 1, 0))
 
 
 def transplant_features(sst: np.ndarray, mmm: float,
@@ -517,11 +564,32 @@ def load_stack(stack_dir: str | None) -> list | None:
     return stack if len(stack) >= 2 else None
 
 
+def _stack_positions(stack_dates: list, sst_dates, n: int) -> list:
+    """R5: map each stack YYYYMMDD date to its SST-series cut position.
+
+    Falls back to the full series (old behaviour) when dates are absent
+    or unparseable, so old callers are unaffected.
+    """
+    if sst_dates is None:
+        return [n - 1] * len(stack_dates)
+    try:
+        ref = np.asarray(sst_dates).astype("datetime64[D]")
+        out = []
+        for d in stack_dates:
+            q = np.datetime64(f"{d[:4]}-{d[4:6]}-{d[6:]}")
+            pos = int(np.searchsorted(ref, q, side="right")) - 1
+            out.append(min(max(pos, DHW_WINDOW_DAYS), n - 1))
+        return out
+    except Exception:
+        return [n - 1] * len(stack_dates)
+
+
 def build_temporal_dataset(features: dict[str, np.ndarray],
                            sst: np.ndarray, mmm: float,
                            n_times: int = 6, n_pixels: int = 4000,
                            seed: int = RNG_SEED,
-                           stack: list | None = None
+                           stack: list | None = None,
+                           sst_dates=None
                            ) -> tuple[np.ndarray, np.ndarray, list]:
     """Per-pixel sequences (n, t, [ndvi, sci, depth, dhw]) + final labels.
 
@@ -557,10 +625,11 @@ def build_temporal_dataset(features: dict[str, np.ndarray],
         dates = [f"t{k}" for k in range(n_times)]
     else:
         seqs = []
-        for date, bands in stack:
+        cuts = _stack_positions([d for d, _ in stack], sst_dates, len(sst))
+        for (date, bands), cut in zip(stack, cuts):
             f = process_satellite(bands)
             dhw_here = thermal_features(
-                np.asarray(sst[:len(sst)], dtype=float), mmm)["dhw"]
+                np.asarray(sst[:cut + 1], dtype=float), mmm)["dhw"]
             seqs.append(np.column_stack([
                 f["ndvi_sub"].ravel()[samp], f["sci"].ravel()[samp],
                 f["depth_proxy"].ravel()[samp],
@@ -685,8 +754,12 @@ def build_site_supervised_matrix(features: dict[str, np.ndarray],
 
 
 def train_risk_model(X: np.ndarray, y: np.ndarray, seed: int = RNG_SEED,
-                     extra: tuple = ()):
-    """Stratified split + LightGBM; `extra` arrays are split in sync."""
+                     extra: tuple = (), cols: list[int] | None = None):
+    """Stratified split + LightGBM; `extra` arrays are split in sync.
+
+    `cols` is an R5 prune mask: constraints are sliced to match, and the
+    fitted model expects caller blocks sliced with the same mask.
+    """
     from sklearn.model_selection import train_test_split
     parts = train_test_split(X, y, *extra, test_size=0.25,
                              random_state=seed, stratify=y)
@@ -694,12 +767,15 @@ def train_risk_model(X: np.ndarray, y: np.ndarray, seed: int = RNG_SEED,
     rest = parts[4:]
     extras = [(rest[2 * i], rest[2 * i + 1]) for i in range(len(extra))]
     import lightgbm as lgb
+    mono = monotone_constraints()
+    if cols is not None:
+        mono = [mono[i] for i in cols]
     model = lgb.LGBMClassifier(objective="multiclass", num_class=N_CLASSES,
                                n_estimators=400, learning_rate=0.05,
                                num_leaves=63, min_child_samples=40,
                                subsample=0.9, colsample_bytree=0.9,
                                reg_lambda=5.0, class_weight="balanced",
-                               monotone_constraints=monotone_constraints(),
+                               monotone_constraints=mono,
                                random_state=seed, verbose=-1)
     model.fit(Xtr, ytr)
     return model, (Xtr, Xte, ytr, yte), extras
@@ -708,8 +784,13 @@ def train_risk_model(X: np.ndarray, y: np.ndarray, seed: int = RNG_SEED,
 # ---------------------------------------------------------------------------
 # 4. Evaluation + 30-day forecast GeoTIFF export
 # ---------------------------------------------------------------------------
-def evaluate_model(model, Xte: np.ndarray, yte: np.ndarray) -> dict:
-    """ROC-AUC (OvR), per-class Precision-Recall, DHW importance, confusion."""
+def evaluate_model(model, Xte: np.ndarray, yte: np.ndarray,
+                   names: list[str] | None = None) -> dict:
+    """ROC-AUC (OvR), per-class Precision-Recall, DHW importance, confusion.
+
+    `names` overrides FEATURE_NAMES when the model trained on an R5-pruned
+    column subset.
+    """
     from sklearn.metrics import (roc_auc_score, average_precision_score,
                                  confusion_matrix, classification_report)
     proba = model.predict_proba(Xte)
@@ -734,10 +815,11 @@ def evaluate_model(model, Xte: np.ndarray, yte: np.ndarray) -> dict:
         }
     gain = model.booster_.feature_importance(importance_type="gain")
     split = model.booster_.feature_importance(importance_type="split")
+    names = list(names) if names is not None else FEATURE_NAMES
     metrics["feature_importance_gain"] = {
-        f: float(gain[i]) for i, f in enumerate(FEATURE_NAMES)}
+        f: float(gain[i]) for i, f in enumerate(names)}
     metrics["feature_importance_split"] = {
-        f: int(split[i]) for i, f in enumerate(FEATURE_NAMES)}
+        f: int(split[i]) for i, f in enumerate(names)}
     dhw_gain = metrics["feature_importance_gain"]["dhw"]
     total_gain = sum(metrics["feature_importance_gain"].values()) or 1.0
     metrics["dhw_gain_share"] = float(dhw_gain / total_gain)
@@ -748,14 +830,21 @@ def export_forecast_geotiff(model, features: dict[str, np.ndarray],
                             therm_fc: dict[str, float],
                             dhw_map_fc: np.ndarray,
                             profile: dict, out_path: str,
-                            temperature: float = 1.0
+                            temperature: float = 1.0,
+                            cols: list[int] | None = None
                             ) -> tuple[np.ndarray, np.ndarray]:
-    """Predict per-pixel 30-day risk; write class + P(severe) GeoTIFF."""
+    """Predict per-pixel 30-day risk; write class + P(severe) GeoTIFF.
+
+    `cols` slices blocks with an R5 prune mask when the model trained
+    on a column subset.
+    """
     import rasterio
     water = features["water"]
     shape = water.shape
     _npix = shape[0] * shape[1]
     Xf = pixel_block(features, np.arange(_npix), therm_fc, dhw_map_fc)
+    if cols is not None:
+        Xf = Xf[:, cols]
     proba = model.predict_proba(Xf)
     if temperature != 1.0:                   # item 7b: calibrated map
         from eval.severity_leadtime import apply_temperature
@@ -818,6 +907,13 @@ def parse_args() -> argparse.Namespace:
                         "real-label pixel training path")
     p.add_argument("--site_radius_px", type=int, default=5,
                    help="water-pixel window radius sampled per site")
+    p.add_argument("--prune_dead", action="store_true",
+                   help="R5: drop zero-variance/zero-gain features via a "
+                        "probe fit before training (recorded in metrics)")
+    p.add_argument("--downscale", action="store_true",
+                   help="R3: sharpen the forecast DHW map with the RCNN "
+                        "downscaler (depth + water static channels, "
+                        "patch/val split)")
     return p.parse_args()
 
 
@@ -863,17 +959,53 @@ def main() -> None:
     # --- 3. Train -------------------------------------------------------------
     X, y, _, row_leads_wk, row_regions, row_quad = build_training_matrix(
         features, sst, args.mmm, n_snapshots=12, seed=args.seed)
+    dhw_col = X[:, DHW_COL].copy()
+    prune_cols = None
+    if args.prune_dead:  # R5: probe-prune dead features before training
+        prune_cols = select_features(X, y, seed=args.seed)
+        X = X[:, prune_cols]
+        print(f"R5 pruned features: kept "
+              f"{[FEATURE_NAMES[i] for i in prune_cols]}")
     uniq, counts = np.unique(y, return_counts=True)
     print(f"Training pixels: {len(y)} | class distribution: "
           f"{dict(zip(uniq.tolist(), counts.tolist()))}")
     model, (Xtr, Xte, ytr, yte), [(leads_tr, leads_te),
-                                          (regs_tr, regs_te)] = train_risk_model(
-        X, y, args.seed, extra=(row_leads_wk, row_regions))
+                                  (regs_tr, regs_te),
+                                  (_dhw_tr, dhw_te)] = train_risk_model(
+        X, y, args.seed, extra=(row_leads_wk, row_regions, dhw_col),
+        cols=prune_cols)
 
     # --- 4. Evaluate ----------------------------------------------------------
-    metrics = evaluate_model(model, Xte, yte)
+    metrics = evaluate_model(
+        model, Xte, yte,
+        names=[FEATURE_NAMES[i] for i in prune_cols]
+        if prune_cols is not None else None)
+    if prune_cols is not None:
+        metrics["pruned_features"] = [FEATURE_NAMES[i]
+                                      for i in prune_cols]
     metrics["thermal_now_C_weeks"] = therm_now
     metrics["mmm_baseline_C"] = args.mmm
+    from eval.run_registry import new_run as _new_run
+    metrics["run"] = _new_run(seed=args.seed)
+    # R2: harder baselines scored on the same test pixels.
+    _dhw_te = np.asarray(dhw_te, dtype=float)
+    _std_rule = np.where(_dhw_te >= 8.0, 2, np.where(_dhw_te >= 4.0, 1, 0))
+    _red_rule = redefined_dhw_predict(_dhw_te)
+    _maj = int(np.bincount(np.asarray(yte)).argmax())
+    metrics["baselines"] = {
+        "dhw_rule_accuracy": round(float((_std_rule == yte).mean()), 4),
+        "redefined_dhw_accuracy": round(float((_red_rule == yte).mean()), 4),
+        "majority_accuracy": round(float((np.full_like(yte, _maj)
+                                          == yte).mean()), 4),
+        "redefined_def": {"offset_C": REDEFINED_OFFSET,
+                          "window_days": REDEFINED_WINDOW_DAYS,
+                          "threshold_C_weeks": REDEFINED_THRESHOLD},
+    }
+    print(f"Baselines on test pixels: DHW rule "
+          f"{metrics['baselines']['dhw_rule_accuracy']} | redefined-DHW "
+          f"{metrics['baselines']['redefined_dhw_accuracy']} | majority "
+          f"{metrics['baselines']['majority_accuracy']} | model "
+          f"{metrics['accuracy']:.3f}")
     print(f"ROC-AUC (OvR macro): {metrics['roc_auc_ovr_macro']:.3f} | "
           f"accuracy: {metrics['accuracy']:.3f} | "
           f"DHW gain share: {metrics['dhw_gain_share']:.3f}")
@@ -901,7 +1033,8 @@ def main() -> None:
         from models.sits_mamba import SITSClassifier
         stack = load_stack(args.stack_dir)
         Xs, ys, sdates = build_temporal_dataset(
-            features, sst, args.mmm, stack=stack, seed=args.seed)
+            features, sst, args.mmm, stack=stack, seed=args.seed,
+            sst_dates=sst_df["date"].to_numpy())
         tr_i, te_i = _tts(np.arange(len(ys)), test_size=0.3,
                           random_state=args.seed, stratify=ys)
         tclf = SITSClassifier(epochs=30, seed=args.seed).fit(Xs[tr_i], ys[tr_i])
@@ -924,6 +1057,8 @@ def main() -> None:
         Xs, ys, sids = build_site_supervised_matrix(
             features, _sites, therm_now, _dhw_now, profile["transform"],
             profile["crs"], radius_px=args.site_radius_px, seed=args.seed)
+        if prune_cols is not None:
+            Xs = Xs[:, prune_cols]
         n_sites = int(len(set(sids.tolist()))) if len(sids) else 0
         metrics["site_supervised"] = {"n_sites_used": n_sites,
                                       "n_pixels": int(len(ys)),
@@ -935,12 +1070,15 @@ def main() -> None:
             tri, tei = _ss(np.arange(len(ys)), test_size=0.3,
                            random_state=args.seed, stratify=ys)
             import lightgbm as _lgb
+            _mono = monotone_constraints()
+            if prune_cols is not None:
+                _mono = [_mono[i] for i in prune_cols]
             _clf = _lgb.LGBMClassifier(
                 objective="multiclass", num_class=N_CLASSES,
                 n_estimators=200, learning_rate=0.05, num_leaves=31,
                 min_child_samples=20, subsample=0.9, colsample_bytree=0.9,
                 reg_lambda=5.0, class_weight="balanced",
-                monotone_constraints=monotone_constraints(),
+                monotone_constraints=_mono,
                 random_state=args.seed, verbose=-1).fit(Xs[tri], ys[tri])
             _pred = _clf.predict(Xs[tei])
             _agree = float((_clf.predict(Xs[tei])
@@ -959,11 +1097,14 @@ def main() -> None:
     temperature = 1.0
     if args.calibrate:  # item 7b: temperature scaling on a cal split
         from eval.severity_leadtime import (apply_temperature,
+                                            brier_skill_score,
                                             expected_calibration_error,
-                                            fit_temperature)
+                                            fit_temperature,
+                                            fit_temperature_cv)
         proba_te = model.predict_proba(Xte)
         half = len(yte) // 2
         cal = fit_temperature(yte[:half], proba_te[:half])
+        cal_cv = fit_temperature_cv(yte, proba_te, seed=args.seed)
         temperature = cal["temperature"]
         ece_before = expected_calibration_error(
             yte[half:], proba_te[half:, 2])["ece"]
@@ -971,7 +1112,10 @@ def main() -> None:
             yte[half:], apply_temperature(proba_te[half:],
                                           temperature)[:, 2])["ece"]
         metrics["calibration"] = {**cal, "ece_before": ece_before,
-                                  "ece_after": ece_after}
+                                  "ece_after": ece_after,
+                                  "cross_fit": cal_cv,
+                                  "brier_skill": brier_skill_score(
+                                      yte, proba_te)}
         print(f"Calibration (item 7): T={temperature}, "
               f"ECE {ece_before} -> {ece_after}")
 
@@ -1001,9 +1145,25 @@ def main() -> None:
     therm_fc = thermal_features(sst_fc, args.mmm, dates=_fc_dates)
     dhw_map_fc = np.clip(
         therm_fc["dhw"] * (0.85 + 0.30 * features["depth_proxy"]), 0, None)
+    if args.downscale:  # R3: reef-scale DHW via patch-trained downscaler
+        from models.sst_downscale_rcnn import RCNNDownscaler
+        _h, _w = dhw_map_fc.shape
+        _ch, _cw = _h // 4, _w // 4
+        _coarse = dhw_map_fc[:_ch * 4, :_cw * 4].reshape(
+            _ch, 4, _cw, 4).mean(axis=(1, 3))
+        _static = np.stack([features["depth_proxy"][:_ch * 4, :_cw * 4],
+                            features["water"][:_ch * 4, :_cw * 4]
+                            .astype(np.float32)])
+        _ds = RCNNDownscaler(seed=args.seed).fit(
+            _coarse, dhw_map_fc[:_ch * 4, :_cw * 4], _static)
+        dhw_map_fc = np.clip(_ds.predict(_coarse, _static), 0, None)
+        metrics["downscale"] = {"val_rmse": _ds.val_rmse_,
+                                "static": ["depth_proxy", "water"]}
+        print(f"RCNN downscale (R3): val RMSE={_ds.val_rmse_}")
     risk, p_severe = export_forecast_geotiff(
         model, features, therm_fc, dhw_map_fc, profile,
-        "coral_bleaching_risk_forecast.tif", temperature=temperature)
+        "coral_bleaching_risk_forecast.tif", temperature=temperature,
+        cols=prune_cols)
     water_risk = risk[features["water"]]
     for c in range(N_CLASSES):
         frac = float((water_risk == c).mean())
@@ -1031,7 +1191,9 @@ def main() -> None:
               f"{len(sev['by_lead'])} lead x region rows")
     with open("bleaching_evaluation_metrics.json", "w") as f:
         json.dump(metrics, f, indent=2, default=str)
-    print("Wrote coral_bleaching_risk_forecast.tif + bleaching_evaluation_metrics.json")
+    from eval.run_registry import record as _record
+    print("Wrote coral_bleaching_risk_forecast.tif + bleaching_evaluation_metrics.json "
+          f"+ {_record(metrics, 'forecaster')}")
     try:
         import matplotlib
         matplotlib.use("Agg")

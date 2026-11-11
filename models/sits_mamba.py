@@ -79,16 +79,21 @@ class SITSClassifier:
 
     def __init__(self, backbone: str = "gru", hidden: int = 32,
                  epochs: int = 60, lr: float = 3e-3, seed: int = 0,
-                 aux_weight: float = 0.1):
+                 aux_weight: float = 0.1, patience: int = 30,
+                 val_fraction: float = 0.2):
         self.backbone = backbone
         self.epochs = epochs
         self.lr = lr
         self.seed = seed
         self.hidden = hidden
         self.aux_weight = aux_weight
+        # R7: early stopping on a held-out split instead of fixed epochs.
+        self.patience = patience
+        self.val_fraction = val_fraction
         self.net = None
         self.fallback = None
         self.recon_mse_: float | None = None
+        self.val_acc_: float | None = None
 
     @staticmethod
     def _mask(X: np.ndarray) -> np.ndarray:
@@ -105,6 +110,7 @@ class SITSClassifier:
                 max_iter=200, random_state=self.seed)
             self.fallback.fit(Xf.reshape(len(Xf), -1), y)
             return self
+        import copy
         torch.manual_seed(self.seed)
         self.net = TemporalNet(X.shape[2], self.hidden, self.backbone)
         opt = torch.optim.Adam(self.net.parameters(), lr=self.lr)
@@ -114,32 +120,68 @@ class SITSClassifier:
         mt = torch.tensor(mask)
         yt = torch.tensor(y)
         wrng = torch.Generator().manual_seed(self.seed)
+        # R7: internal train/val split (seeded) drives early stopping.
+        n = len(Xf)
+        perm = np.random.default_rng(self.seed).permutation(n)
+        n_val = max(10, int(n * self.val_fraction))
+        va, tr = perm[:n_val], perm[n_val:]
+        Xt_tr, mt_tr, yt_tr = Xt[tr], mt[tr], yt[tr]
+        Xt_va, mt_va, yt_va = Xt[va], mt[va], yt[va]
         self.net.train()
         if self.aux_weight > 0:
             # Stage A (SITSMamba-style): masked-reconstruction pretraining.
             # Corrupt 40% of valid steps, reconstruct originals, no labels.
             for _ in range(80):
                 opt.zero_grad()
-                drop = ((torch.rand(mt.shape, generator=wrng) < 0.40)
-                        & (mt > 0))
+                drop = ((torch.rand(mt_tr.shape, generator=wrng) < 0.40)
+                        & (mt_tr > 0))
                 if not drop.any():
                     continue
-                Xc = Xt * (~drop).unsqueeze(-1).float()
-                _, recon = self.net(Xc, mt)
-                loss = mse_fn(recon[drop], Xt[drop])
+                Xc = Xt_tr * (~drop).unsqueeze(-1).float()
+                _, recon = self.net(Xc, mt_tr)
+                loss = mse_fn(recon[drop], Xt_tr[drop])
                 loss.backward()
                 opt.step()
+            # R7: recon metric on FRESH masked positions only (seeded), not
+            # on all valid steps — the old denominator included visible
+            # steps and flattered the "beats the mean" claim.
             with torch.no_grad():
-                _, recon = self.net(Xt, mt)
-                self.recon_mse_ = float(mse_fn(recon * mt.unsqueeze(-1),
-                                               Xt * mt.unsqueeze(-1)))
-        # Stage B: supervised classification on clean input.
+                drop = ((torch.rand(mt_tr.shape,
+                                    generator=torch.Generator()
+                                    .manual_seed(self.seed + 999)) < 0.40)
+                        & (mt_tr > 0))
+                if drop.any():
+                    Xc = Xt_tr * (~drop).unsqueeze(-1).float()
+                    _, recon = self.net(Xc, mt_tr)
+                    self.recon_mse_ = float(mse_fn(recon[drop],
+                                                   Xt_tr[drop]))
+        # Stage B: supervised classification with val early stopping.
+        best, best_state, bad = float("inf"), None, 0
         for _ in range(self.epochs):
             opt.zero_grad()
-            logits, _ = self.net(Xt, mt)
-            loss = loss_fn(logits, yt)
+            logits, _ = self.net(Xt_tr, mt_tr)
+            loss = loss_fn(logits, yt_tr)
             loss.backward()
             opt.step()
+            self.net.eval()
+            with torch.no_grad():
+                vl, _ = self.net(Xt_va, mt_va)
+                v = float(loss_fn(vl, yt_va))
+            self.net.train()
+            if v < best - 1e-6:
+                best, best_state, bad = v, copy.deepcopy(
+                    self.net.state_dict()), 0
+            else:
+                bad += 1
+                if bad >= self.patience:
+                    break
+        if best_state is not None:
+            self.net.load_state_dict(best_state)
+        self.net.eval()
+        with torch.no_grad():
+            vl, _ = self.net(Xt_va, mt_va)
+            self.val_acc_ = float((vl.argmax(1) == yt_va).float().mean())
+        self.net.train()
         return self
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
@@ -175,7 +217,7 @@ def demo(seed: int = 0) -> dict:
     clf = SITSClassifier(epochs=60, seed=seed).fit(X[tr], y[tr])
     acc = float((clf.predict(X[200:]) == y[200:]).mean())
     out = {"accuracy": acc, "torch": HAS_TORCH, "mamba": HAS_MAMBA,
-           "recon_mse": clf.recon_mse_}
+           "recon_mse": clf.recon_mse_, "val_acc": clf.val_acc_}
     print(out)
     assert acc > 0.5, "temporal encoder must beat chance (0.33)"
     if HAS_TORCH:
