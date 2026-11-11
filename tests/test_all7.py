@@ -395,6 +395,61 @@ class TestRoadmap(unittest.TestCase):
         items = RCNNDownscaler.patches(coarse, fine, static, factor=4)
         self.assertGreater(len(items), 1)
 
+    def test_quadrant_grid(self):
+        import numpy as np
+        from coral_bleaching_forecaster import quadrant_grid
+        g = quadrant_grid((4, 6))
+        self.assertEqual(g.shape, (4, 6))
+        self.assertEqual(g[0, 0], "NW")
+        self.assertEqual(g[0, 5], "NE")
+        self.assertEqual(g[3, 0], "SW")
+        self.assertEqual(g[3, 5], "SE")
+        self.assertEqual(set(np.unique(g)), {"NW", "NE", "SW", "SE"})
+
+    def test_per_basin_train_and_route(self):
+        import numpy as np
+        from coral_bleaching_forecaster import (predict_per_basin,
+                                                train_per_basin_models,
+                                                train_risk_model)
+        rng = np.random.default_rng(2)
+        X = rng.standard_normal((240, 6))
+        y = ((X[:, 0] > 0.5).astype(int)
+             + (X[:, 1] > 0.5).astype(int))
+        self.assertEqual(set(np.unique(y)), {0, 1, 2})
+        # NE has n=20 < min_n=50: skipped to the global fallback.
+        # Narrow test matrix: cols must match the constraint count, the
+        # same convention as train_risk_model (real X is 37 wide).
+        basins = np.array(["NW"] * 120 + ["SE"] * 100 + ["NE"] * 20)
+        cols6 = [0, 1, 2, 3, 4, 5]
+        models = train_per_basin_models(X, y, basins, seed=0,
+                                        cols=cols6, n_estimators=10)
+        self.assertIsNotNone(models["NW"]["model"])
+        self.assertIsNotNone(models["SE"]["model"])
+        self.assertIsNone(models["NE"]["model"])
+        self.assertIn("note", models["NE"])
+        # Single-class basin is skipped, not crashed on.
+        tiny = train_per_basin_models(
+            X[:60], np.zeros(60, dtype=int),
+            np.array(["SW"] * 60), seed=0, cols=cols6,
+            n_estimators=10)
+        self.assertIsNone(tiny["SW"]["model"])
+        # Prune-mask convention: sliced X + sliced constraints must fit.
+        keep = [0, 1, 2]
+        masked = train_per_basin_models(X[:, keep], y, basins, seed=0,
+                                        cols=keep, n_estimators=10)
+        self.assertIsNotNone(masked["NW"]["model"])
+        # Routing: trained-basin rows use their head, skipped and unknown
+        # basin rows exactly match the global fallback.
+        fallback, _, _ = train_risk_model(X, y, 0, cols=cols6)
+        proba = predict_per_basin(models, fallback, X, basins)
+        self.assertEqual(proba.shape, (240, 3))
+        fb = fallback.predict_proba(X)
+        np.testing.assert_allclose(proba[basins == "NE"],
+                                   fb[basins == "NE"])
+        unknown = predict_per_basin(models, fallback, X[:5],
+                                    np.array(["XX"] * 5))
+        np.testing.assert_allclose(unknown, fb[:5])
+
 
 if __name__ == "__main__":
     unittest.main()

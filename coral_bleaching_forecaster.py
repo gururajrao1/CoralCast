@@ -642,6 +642,19 @@ def build_temporal_dataset(features: dict[str, np.ndarray],
     return X_seq.astype(np.float32), y, dates
 
 
+def quadrant_grid(shape) -> np.ndarray:
+    """Quadrant label (NE/NW/SE/SW) per pixel; the R8 deployment basin axis.
+
+    Same N/S-by-row, E/W-by-column rule historically inline in
+    build_training_matrix, factored out so train-time and export-time basin
+    assignment cannot drift apart.
+    """
+    h, w = int(shape[0]), int(shape[1])
+    rr, cc = np.mgrid[0:h, 0:w]
+    return np.char.add(np.where(rr < h // 2, "N", "S"),
+                       np.where(cc < w // 2, "W", "E"))
+
+
 def build_training_matrix(features: dict[str, np.ndarray],
                           sst: np.ndarray, mmm: float,
                           n_snapshots: int = 10,
@@ -694,9 +707,7 @@ def build_training_matrix(features: dict[str, np.ndarray],
     height, width = features["water"].shape
     row_idx = np.concatenate(samp_idx)
     row_regions = np.where((row_idx % width) < width // 2, "west", "east")
-    _ns = np.where((row_idx // width) < height // 2, "N", "S")
-    _ew = np.where((row_idx % width) < width // 2, "W", "E")
-    row_quad = np.array([a + b for a, b in zip(_ns, _ew)])
+    row_quad = quadrant_grid(features["water"].shape).ravel()[row_idx]
     row_leads_wk = np.concatenate([
         np.full(len(b), (final_end - end) / 7.0) for b, end in
         zip(X_blocks, ends)])
@@ -781,6 +792,61 @@ def train_risk_model(X: np.ndarray, y: np.ndarray, seed: int = RNG_SEED,
     return model, (Xtr, Xte, ytr, yte), extras
 
 
+def train_per_basin_models(X: np.ndarray, y: np.ndarray, basins,
+                           seed: int = RNG_SEED,
+                           cols: list[int] | None = None, min_n: int = 50,
+                           n_estimators: int = 400) -> dict:
+    """R8 deployment: one constrained LightGBM head per basin.
+
+    Same hyperparams and monotone constraints as train_risk_model (`cols`
+    slices the constraints exactly like there; the caller slices X).
+    Basins with n < min_n or a single class get model None and fall back
+    to the global head in predict_per_basin.
+    """
+    import lightgbm as lgb
+    Xa = np.asarray(X)
+    ya = np.asarray(y)
+    ba = np.asarray(basins)
+    mono = monotone_constraints()
+    if cols is not None:
+        mono = [mono[i] for i in cols]
+    out = {}
+    for b in sorted(set(ba.tolist())):
+        m = ba == b
+        n = int(m.sum())
+        if n < min_n or len(set(ya[m].tolist())) < 2:
+            out[str(b)] = {"model": None, "n_train": n,
+                           "note": f"n<{min_n} or single-class: "
+                                   "global fallback"}
+            continue
+        clf = lgb.LGBMClassifier(objective="multiclass", num_class=N_CLASSES,
+                                 n_estimators=n_estimators, learning_rate=0.05,
+                                 num_leaves=63, min_child_samples=40,
+                                 subsample=0.9, colsample_bytree=0.9,
+                                 reg_lambda=5.0, class_weight="balanced",
+                                 monotone_constraints=mono,
+                                 random_state=seed, verbose=-1)
+        clf.fit(Xa[m], ya[m])
+        out[str(b)] = {"model": clf, "n_train": n}
+    return out
+
+
+def predict_per_basin(models: dict, fallback, X: np.ndarray,
+                      basins) -> np.ndarray:
+    """Route each row to its basin head; skipped/unknown basins use fallback."""
+    Xa = np.asarray(X)
+    ba = np.asarray(basins)
+    proba = fallback.predict_proba(Xa)
+    for b, entry in models.items():
+        clf = entry.get("model")
+        if clf is None:
+            continue
+        m = ba == b
+        if m.sum():
+            proba[m] = clf.predict_proba(Xa[m])
+    return proba
+
+
 # ---------------------------------------------------------------------------
 # 4. Evaluation + 30-day forecast GeoTIFF export
 # ---------------------------------------------------------------------------
@@ -831,12 +897,14 @@ def export_forecast_geotiff(model, features: dict[str, np.ndarray],
                             dhw_map_fc: np.ndarray,
                             profile: dict, out_path: str,
                             temperature: float = 1.0,
-                            cols: list[int] | None = None
+                            cols: list[int] | None = None,
+                            basin_models: dict | None = None
                             ) -> tuple[np.ndarray, np.ndarray]:
     """Predict per-pixel 30-day risk; write class + P(severe) GeoTIFF.
 
     `cols` slices blocks with an R5 prune mask when the model trained
-    on a column subset.
+    on a column subset. `basin_models` (R8) routes each pixel to its
+    quadrant head via quadrant_grid, falling back to `model`.
     """
     import rasterio
     water = features["water"]
@@ -845,7 +913,11 @@ def export_forecast_geotiff(model, features: dict[str, np.ndarray],
     Xf = pixel_block(features, np.arange(_npix), therm_fc, dhw_map_fc)
     if cols is not None:
         Xf = Xf[:, cols]
-    proba = model.predict_proba(Xf)
+    if basin_models is not None:
+        proba = predict_per_basin(basin_models, model, Xf,
+                                  quadrant_grid(shape).ravel())
+    else:
+        proba = model.predict_proba(Xf)
     if temperature != 1.0:                   # item 7b: calibrated map
         from eval.severity_leadtime import apply_temperature
         proba = apply_temperature(proba, temperature)
@@ -914,6 +986,10 @@ def parse_args() -> argparse.Namespace:
                    help="R3: sharpen the forecast DHW map with the RCNN "
                         "downscaler (depth + water static channels, "
                         "patch/val split)")
+    p.add_argument("--per_basin", action="store_true",
+                   help="R8: train one head per quadrant basin (+ global "
+                        "fallback) and deploy the routed set for the map; "
+                        "report deployed vs global skill on the same split")
     return p.parse_args()
 
 
@@ -971,8 +1047,10 @@ def main() -> None:
           f"{dict(zip(uniq.tolist(), counts.tolist()))}")
     model, (Xtr, Xte, ytr, yte), [(leads_tr, leads_te),
                                   (regs_tr, regs_te),
+                                  (quad_tr, quad_te),
                                   (_dhw_tr, dhw_te)] = train_risk_model(
-        X, y, args.seed, extra=(row_leads_wk, row_regions, dhw_col),
+        X, y, args.seed, extra=(row_leads_wk, row_regions, row_quad,
+                                dhw_col),
         cols=prune_cols)
 
     # --- 4. Evaluate ----------------------------------------------------------
@@ -1009,6 +1087,41 @@ def main() -> None:
     print(f"ROC-AUC (OvR macro): {metrics['roc_auc_ovr_macro']:.3f} | "
           f"accuracy: {metrics['accuracy']:.3f} | "
           f"DHW gain share: {metrics['dhw_gain_share']:.3f}")
+
+    basin_models, proba_dep = None, None
+    if args.per_basin:  # R8: one deployed head per quadrant basin.
+        # Heads train on the global TRAIN split only, so routing the held-out
+        # test rows scores the deployed system with no leakage, on the same
+        # test set as the global model above.
+        from sklearn.metrics import roc_auc_score as _roc
+        basin_models = train_per_basin_models(Xtr, ytr, quad_tr,
+                                              args.seed, cols=prune_cols)
+        proba_dep = predict_per_basin(basin_models, model, Xte, quad_te)
+        pred_dep = proba_dep.argmax(axis=1)
+        _yte = np.asarray(yte)
+        _pb = {"basins": {},
+               "deployed_accuracy": round(float((pred_dep == _yte).mean()),
+                                          4),
+               "deployed_roc_auc_ovr": round(
+                   float(_roc(_yte, proba_dep, multi_class="ovr")), 4),
+               "global_accuracy": metrics["accuracy"]}
+        for _b, _entry in basin_models.items():
+            _m = np.asarray(quad_te) == _b
+            _pb["basins"][_b] = {
+                "n_train": _entry["n_train"],
+                "n_test": int(_m.sum()),
+                "accuracy": round(float((pred_dep[_m] == _yte[_m]).mean()),
+                                  4) if _m.sum() else None}
+            if "note" in _entry:
+                _pb["basins"][_b]["note"] = _entry["note"]
+        _pb["delta_vs_global"] = round(_pb["deployed_accuracy"]
+                                      - _pb["global_accuracy"], 4)
+        metrics["per_basin"] = _pb
+        print(f"Per-basin deployed (R8): acc={_pb['deployed_accuracy']:.3f} "
+              f"vs global {metrics['accuracy']:.3f} "
+              f"(delta {_pb['delta_vs_global']:+.4f}) | " +
+              ", ".join(f"{_b}: {_pb['basins'][_b]['accuracy']}"
+                        for _b in sorted(_pb["basins"])))
 
     if args.multivariate:  # item 6: report pruned multivariate features
         import pandas as pd
@@ -1101,7 +1214,9 @@ def main() -> None:
                                             expected_calibration_error,
                                             fit_temperature,
                                             fit_temperature_cv)
-        proba_te = model.predict_proba(Xte)
+        # R8: calibrate the deployed (routed) system when per-basin is on.
+        proba_te = proba_dep if proba_dep is not None else \
+            model.predict_proba(Xte)
         half = len(yte) // 2
         cal = fit_temperature(yte[:half], proba_te[:half])
         cal_cv = fit_temperature_cv(yte, proba_te, seed=args.seed)
@@ -1163,7 +1278,7 @@ def main() -> None:
     risk, p_severe = export_forecast_geotiff(
         model, features, therm_fc, dhw_map_fc, profile,
         "coral_bleaching_risk_forecast.tif", temperature=temperature,
-        cols=prune_cols)
+        cols=prune_cols, basin_models=basin_models)
     water_risk = risk[features["water"]]
     for c in range(N_CLASSES):
         frac = float((water_risk == c).mean())
@@ -1177,7 +1292,8 @@ def main() -> None:
     if args.eval_report:  # item 7: severity/lead-time product evaluation
         from eval.severity_leadtime import (outlook_style_summary,
                                             plot_reliability)
-        proba_te = model.predict_proba(Xte)
+        proba_te = proba_dep if proba_dep is not None else \
+            model.predict_proba(Xte)
         if temperature != 1.0:
             from eval.severity_leadtime import apply_temperature as _at
             proba_te = _at(proba_te, temperature)
