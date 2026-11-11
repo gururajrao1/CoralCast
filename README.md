@@ -117,7 +117,9 @@ CLI flags: `--sst_model sstode`, `--multivariate`, `--eval_report`,
 `--labels_csv`, `--temporal sits`, `--stack_dir`, `--calibrate`, `--loro`,
 `--site_labels_csv`, `--site_radius_px`, `--prune_dead` (R5 probe-prune of
 zero-variance/zero-gain features), `--downscale` (R3 patch-trained RCNN
-sharpening of the forecast DHW map), plus `--blue/--green/--red/--nir`
+sharpening of the forecast DHW map), `--per_basin` (R8 quadrant-basin
+heads + global fallback, deployed-vs-global on the same test split),
+plus `--blue/--green/--red/--nir`
 `--sst_csv --mmm` for pilot runs. Benchmark flags: `--seeds` (sweep with
 CIs), `--max-blocks`, `--block-deg`, `--no-dedupe`, `--covariate` (R8
 external lead-time covariate CSV). Per-basin models apply a minimum-n rule
@@ -131,7 +133,7 @@ may show exit 1 on passing unittest runs (stderr artifact — trust `OK`).
 
 GCBD numbers below are re-measured Nov 11 (R1–R10 build, project venv,
 3-seed sweep). Synthetic pipeline numbers are the Nov 9 state plus the new
-R2/R6 rows re-measured Nov 11. `--prune_dead` + `--downscale` variant
+R2/R6 rows and the R8 `--per_basin` run, both re-measured Nov 11. `--prune_dead` + `--downscale` variant
 (re-measured Nov 11): 21/37 features kept, model parity 0.965/0.947, DHW
 gain share 0.231 → 0.300, downscale val RMSE 0.076, site 0.4931 — pruning
 removes dead weight without losing skill. Test suite: 28 tests
@@ -145,7 +147,7 @@ removes dead weight without losing skill. Test suite: 28 tests
 | ROC-AUC (ovr macro) | 0.9467 |
 | AP per class 0/1/2 (supports 4385/2465/17150) | 0.926 / 0.859 / 0.965 |
 | Confusion | [[4070,42,273],[59,2096,310],[67,78,17005]] |
-| Calibration T / NLL / ECE | 0.7628, 0.2202 → 0.203, 0.0717 → 0.0299 |
+| Calibration T / NLL / ECE | 0.9876, 0.2071 → 0.2070, 0.0327 → 0.0313 (fit on the `--per_basin` deployed system) |
 | Quadrant-LORO acc / ROC | 0.9652 ± 0.0011 / 0.9459 |
 | SITS temporal head vs LightGBM | 0.965 vs 0.9655 (tie) |
 | Site-supervised path (10 sites, 1210 px) | acc 0.4904, rule-head agreement 0.5372 |
@@ -153,7 +155,8 @@ removes dead weight without losing skill. Test suite: 28 tests
 | Forecast map at DHW 5.60 | 100% class 2 (saturated demo regime — expected, not a bug) |
 | Severity/lead-time ECE | 0.0294; hit_rate 0.978–1.0 at leads 15–30 d |
 | R2 baselines, same test pixels (re-measured Nov 11) | DHW rule 0.6137, redefined-DHW **0.7496**, majority 0.7146, model 0.965 |
-| Calibration Brier (synthetic) | 0.0274, BSS **+0.82** vs climatology |
+| Per-basin deployed vs global (same test split) | deployed 0.9625 / ROC 0.9479 vs global 0.9655 (delta −0.003); NE 0.9616 / NW 0.9649 / SE 0.9617 / SW 0.9618 |
+| Calibration Brier (synthetic) | 0.0261, BSS **+0.82** vs climatology |
 
 ### 5.2 Real GCBD benchmark (re-measured Nov 11, R1–R10 build)
 
@@ -275,6 +278,16 @@ Each item: what to change, why (literature), expected gain, effort.
   geo coordinates (leakage-adjacent: Latitude_Degrees gain 18395 adds
   zero accuracy), add CFSv2/Outlook or short-range forecast SST as a
   lead-time feature; plot skill-vs-lead × severity (DHW≥4 vs ≥8).
+  Deployment wiring shipped Nov 11: `quadrant_grid` basin axis (single
+  source of truth for train-time and export-time assignment),
+  `train_per_basin_models` / `predict_per_basin` with the min-n /
+  single-class global-fallback rule, `--per_basin` end-to-end (heads train
+  on the train split only, routed skill scored on the same held-out test
+  split — no leakage). Measured Nov 11 (same flags + `--per_basin`,
+  run `f6b92864375b`): deployed 0.9625 / ROC 0.9479 vs global 0.9655
+  (delta −0.003; NE 0.9616, NW 0.9649, SE 0.9617, SW 0.9618 over
+  ~5.6–6.5k test rows per basin) — parity, expected on the smooth toy
+  field; the transfer to real realm labels is still open.
 - **R9 Atlas-style pilot redo (M).** Warning-triggered biweekly
   baseline-vs-2wk-post median brightening with QA60/SCL masking (Allen
   Atlas design); fix the 2003–04 vs 2022 mismatch; handle 96% imbalance.
@@ -363,9 +376,11 @@ CoralCast main (10 commits, 40 files, in sync), README data-sources
 timeouts. Nov 11 built the full R1–R10 roadmap (honest splits, harder
 baselines, RCNN/SSTODE/SITS rework, feature hygiene, cross-fit calibration,
 per-basin models, pilot hardening, 13 roadmap tests + run registry),
-re-measured all numbers above, 28/28 tests green. Next session: re-run the
-fastest line above, then pick the top unblocked item that still needs data
-access (AIMS 2022 pull for G2, or train-per-basin deployment wiring for R8).
+re-measured all numbers above, 28/28 tests green. Per-basin deployment
+wiring (R8, `--per_basin`) followed the same day, 30/30 tests green.
+Next session: re-run the fastest line above, then pick the top unblocked
+item that still needs data access (AIMS 2022 pull for G2, or real realm
+labels to transfer the per-basin wiring beyond quadrants).
 
 ## 9. References
 
