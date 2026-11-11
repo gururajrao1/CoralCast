@@ -70,6 +70,69 @@ def apply_temperature(proba: np.ndarray, temperature: float) -> np.ndarray:
     return e / e.sum(axis=1, keepdims=True)
 
 
+def fit_temperature_cv(y_true: np.ndarray, proba: np.ndarray,
+                       n_splits: int = 3, **kw) -> dict:
+    """R6: cross-fit temperature scaling (fit T on K-1 folds, eval NLL out).
+
+    Unlike fit_temperature (in-sample), the reported nll_after is the mean
+    out-of-fold NLL, and `temperature` is the mean fold-T applied to new
+    data. Deterministic for a fixed seed kwarg.
+    """
+    import numpy as np
+    from sklearn.model_selection import StratifiedKFold
+    y_true = np.asarray(y_true, dtype=int)
+    proba = np.asarray(proba, dtype=float)
+    seed = int(kw.pop("seed", 0))
+    nlls, ts = [], []
+    for tr, te in StratifiedKFold(n_splits=n_splits, shuffle=True,
+                                  random_state=seed).split(proba, y_true):
+        fold = fit_temperature(y_true[tr], proba[tr], **kw)
+        ts.append(fold["temperature"])
+        e = np.exp(np.log(np.clip(proba[te], 1e-9, 1.0))
+                   / max(float(fold["temperature"]), 1e-6))
+        e = e / e.sum(axis=1, keepdims=True)
+        nlls.append(float(-np.log(e[np.arange(len(te)),
+                                    y_true[te]]).mean()))
+    base = float(-np.log(np.clip(proba[np.arange(len(y_true)), y_true],
+                                 1e-9, 1.0)).mean())
+    return {"temperature": round(float(np.mean(ts)), 4),
+            "temperature_std": round(float(np.std(ts)), 4),
+            "nll_before": round(base, 4),
+            "nll_after": round(float(np.mean(nlls)), 4),
+            "n_splits": n_splits, "cross_fit": True}
+
+
+def brier_score(y_true: np.ndarray, proba: np.ndarray) -> dict:
+    """Multiclass Brier score (mean squared prob error) + per-class."""
+    import numpy as np
+    y_true = np.asarray(y_true, dtype=int)
+    proba = np.clip(np.asarray(proba, dtype=float), 0, 1)
+    n_class = proba.shape[1]
+    onehot = np.eye(n_class)[y_true]
+    per = {str(c): round(float(np.mean((proba[:, c]
+                                        - (y_true == c)) ** 2)), 4)
+           for c in range(n_class)}
+    return {"brier": round(float(np.mean((proba - onehot) ** 2)), 4),
+            "per_class": per}
+
+
+def brier_skill_score(y_true: np.ndarray, proba: np.ndarray) -> dict:
+    """BSS vs a climatology (class-frequency) reference forecast.
+
+    Positive = better than predicting base rates; 1 = perfect.
+    """
+    import numpy as np
+    y_true = np.asarray(y_true, dtype=int)
+    proba = np.clip(np.asarray(proba, dtype=float), 0, 1)
+    freq = np.bincount(y_true, minlength=proba.shape[1]) / len(y_true)
+    ref = np.tile(freq, (len(y_true), 1))
+    bs = brier_score(y_true, proba)["brier"]
+    bs_ref = brier_score(y_true, ref)["brier"]
+    return {"brier": bs, "brier_ref_climatology": bs_ref,
+            "bss_vs_climatology": round(float(1 - bs / max(bs_ref, 1e-12)),
+                                        4)}
+
+
 def expected_calibration_error(y_true: np.ndarray, p_severe: np.ndarray,
                                n_bins: int = 10) -> dict:
     """ECE + reliability table for P(severe)."""

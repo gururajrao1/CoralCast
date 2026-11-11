@@ -213,5 +213,188 @@ class TestCodePhase(unittest.TestCase):
         self.assertTrue(set(np.unique(ys)) <= {0, 1, 2})
 
 
+class TestRoadmap(unittest.TestCase):
+    """R10: pin the honest-validation / baseline / calibration gates."""
+
+    def test_dedupe_events(self):
+        import pandas as pd
+        from eval.gcbd_benchmark import dedupe_events
+        df = pd.DataFrame({
+            "Site_ID": ["a", "a", "b"], "Date": ["2020-01-01"] * 3,
+            "Percent_Bleaching": [10.0, 10.0, 50.0],
+            "SSTA_DHW": [1.0, 1.0, 5.0], "TSA_DHW": [0.5, 0.5, 2.0]})
+        out = dedupe_events(df)
+        self.assertEqual(len(out), 2)
+
+    def test_redefined_dhw(self):
+        import numpy as np
+        from coral_bleaching_forecaster import (
+            compute_dhw_series, redefined_dhw, redefined_dhw_predict)
+        # +0.6 over MMM: invisible to the standard >=1.0 cutoff,
+        # caught by the redefined >=0.4 cutoff (the point of R2).
+        sst = np.full(200, 29.1)
+        self.assertEqual(float(compute_dhw_series(sst, 28.5)[-1]), 0.0)
+        self.assertGreater(redefined_dhw(sst, 28.5), 0.0)
+        self.assertEqual(list(redefined_dhw_predict(
+            np.array([0.0, 3.5, 7.0]))), [0, 1, 2])
+
+    def test_null_forecasts(self):
+        import numpy as np
+        from models.sstode_forecast import null_forecasts
+        s = 28.0 + np.sin(2 * np.pi * np.arange(400) / 365)
+        n = null_forecasts(s, 30)
+        self.assertTrue((n["persistence"] == s[-1]).all())
+        self.assertEqual(len(n["damped_persistence"]), 30)
+        self.assertEqual(len(n["climatology"]), 30)
+
+    def test_majority_baseline(self):
+        import numpy as np
+        from eval.gcbd_benchmark import majority_baseline_accuracy
+        self.assertAlmostEqual(majority_baseline_accuracy(
+            np.array([2, 2, 2, 0, 1])), 0.6)
+
+    def test_crossfit_calibration(self):
+        import numpy as np
+        from eval.severity_leadtime import (brier_skill_score,
+                                            fit_temperature_cv)
+        rng = np.random.default_rng(0)
+        y = rng.integers(0, 3, 300)
+        p = np.full((300, 3), 1 / 3) + rng.standard_normal((300, 3)) * 0.05
+        p = np.clip(p, 1e-9, 1.0)
+        p /= p.sum(axis=1, keepdims=True)
+        c1 = fit_temperature_cv(y, p, seed=0)
+        c2 = fit_temperature_cv(y, p, seed=0)
+        self.assertTrue(c1["cross_fit"])
+        self.assertEqual(c1["temperature"], c2["temperature"])
+        self.assertGreaterEqual(c1["temperature"], 0.05)
+        self.assertLessEqual(c1["temperature"], 10.0)
+        onehot = np.eye(3)[y]
+        self.assertAlmostEqual(brier_skill_score(y, onehot)
+                               ["bss_vs_climatology"], 1.0, places=3)
+
+    def test_severity_and_basins(self):
+        import numpy as np
+        from eval.gcbd_benchmark import run_per_basin, skill_by_severity
+        y = np.array([0, 1, 2, 2, 0, 1])
+        pred = np.array([0, 1, 2, 1, 0, 0])
+        dhw = np.array([0.0, 5.0, 9.0, 9.0, 1.0, 2.0])
+        s = skill_by_severity(y, pred, dhw)
+        self.assertEqual(s["dhw_ge_8"]["n"], 2)
+        self.assertEqual(s["dhw_ge_8"]["accuracy"], 0.5)
+        regs = np.array(["A"] * 200 + ["B"] * 10)
+        X = np.random.default_rng(0).standard_normal((210, 4))
+        yy = (X[:, 0] > 0).astype(int)
+        b = run_per_basin(X, yy, regs, n_estimators=10, min_n=50)
+        self.assertIsNotNone(b["A"]["accuracy"])
+        self.assertIsNone(b["B"]["accuracy"])  # n=10 < min_n: skipped
+
+    def test_honest_splits_synthetic(self):
+        import numpy as np
+        from eval.gcbd_benchmark import (forward_temporal_scores,
+                                         grouped_split_scores,
+                                         spatial_block_scores)
+        rng = np.random.default_rng(1)
+        X = rng.standard_normal((120, 4))
+        y = (X[:, 0] > 0).astype(int)
+        groups = np.array([f"site{i % 12}" for i in range(120)])
+        lat = rng.uniform(-20, 20, 120)
+        lon = rng.uniform(140, 160, 120)
+        g = grouped_split_scores(X, y, groups, seed=0, n_estimators=10)
+        self.assertGreaterEqual(g["accuracy"], 0.0)
+        self.assertGreater(g["n_groups_test"], 0)
+        b = spatial_block_scores(X, y, lat, lon, seed=0, n_estimators=10)
+        self.assertGreater(b["n_blocks"], 1)
+        import pandas as pd
+        dates = pd.date_range("2020-01-01", periods=120)
+        t = forward_temporal_scores(X, y, dates, seed=0, n_estimators=10)
+        self.assertGreaterEqual(t["n_folds"], 1)
+
+    def test_select_features(self):
+        import numpy as np
+        from coral_bleaching_forecaster import (DHW_COL, FEATURE_NAMES,
+                                                select_features)
+        rng = np.random.default_rng(0)
+        X = rng.standard_normal((300, len(FEATURE_NAMES)))
+        X[:, 1] = 1.0  # zero-variance dead column
+        y = (X[:, DHW_COL] > 0).astype(int)
+        keep = select_features(X, y, seed=0, n_estimators=10)
+        self.assertNotIn(1, keep)
+        self.assertIn(DHW_COL, keep)
+        # pruned constraint vector must match pruned width (site-head crash)
+        import lightgbm as lgb
+        from coral_bleaching_forecaster import monotone_constraints
+        mono = [monotone_constraints()[i] for i in keep]
+        clf = lgb.LGBMClassifier(n_estimators=5, verbose=-1,
+                                 monotone_constraints=mono)
+        clf.fit(X[:, keep], y)  # must not raise
+        self.assertEqual(len(mono), X[:, keep].shape[1])
+
+    def test_stack_positions(self):
+        import numpy as np
+        from coral_bleaching_forecaster import _stack_positions
+        dates = np.array(["2022-01-01", "2022-06-01"],
+                         dtype="datetime64[D]")
+        sst_dates = np.arange(np.datetime64("2022-01-01"),
+                              np.datetime64("2023-01-01"),
+                              dtype="datetime64[D]")
+        pos = _stack_positions(["20220101", "20220601"], sst_dates, 365)
+        self.assertEqual(pos[0], 84)  # clamped to DHW window floor
+        self.assertGreater(pos[1], pos[0])
+        self.assertEqual(_stack_positions(["20220101"], None, 365), [364])
+
+    def test_change_map_and_balance(self):
+        import numpy as np
+        import pandas as pd
+        from pilot_sekisei import balance_report, bleaching_change_map
+        base = np.full((10, 10), 0.10)
+        event = base.copy()
+        event[:5] = 0.15
+        cm = bleaching_change_map(base, event, thresh=0.03)
+        self.assertAlmostEqual(cm["fraction_flagged"], 0.5)
+        lab = pd.DataFrame({"label": [0] * 96 + [2] * 4})
+        br = balance_report(lab)
+        self.assertAlmostEqual(br["minority_fraction"], 0.04)
+
+    def test_run_registry(self):
+        import tempfile
+        from eval.run_registry import new_run, record
+        run = new_run(argv=["--demo"], seed=0)
+        self.assertIn("run_id", run)
+        self.assertEqual(run["seed"], 0)
+        with tempfile.NamedTemporaryFile(
+                suffix=".jsonl", delete=False) as tmp:
+            path = record({"run": run, "accuracy": 0.9}, "probe",
+                          registry=tmp.name)
+        with open(path) as f:
+            line = f.read().strip()
+        self.assertIn("probe", line)
+
+    def test_add_covariate(self):
+        import pandas as pd
+        from eval.gcbd_benchmark import add_covariate
+        df = pd.DataFrame({"Site_ID": ["a", "b"], "Date": ["2020-01-01"] * 2,
+                           "x": [1.0, 2.0]})
+        self.assertIs(add_covariate(df, None), df)
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+                suffix=".csv", delete=False, mode="w") as tmp:
+            tmp.write("Site_ID,Date,outlook_p\n"
+                      "a,2020-01-01,0.7\nb,2020-01-01,0.2\n")
+            path = tmp.name
+        out = add_covariate(df, path)
+        self.assertIn("outlook_p", out.columns)
+        self.assertAlmostEqual(out["outlook_p"].iloc[0], 0.7)
+
+    def test_downscale_patches(self):
+        import numpy as np
+        from models.sst_downscale_rcnn import RCNNDownscaler
+        rng = np.random.default_rng(0)
+        fine = rng.standard_normal((64, 64)).astype(np.float32)
+        coarse = fine.reshape(16, 4, 16, 4).mean(axis=(1, 3))
+        static = np.stack([np.ones((64, 64), dtype=np.float32)] * 2)
+        items = RCNNDownscaler.patches(coarse, fine, static, factor=4)
+        self.assertGreater(len(items), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
