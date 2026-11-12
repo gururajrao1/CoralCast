@@ -1,0 +1,214 @@
+{
+  "n": 9904,
+  "n_features": 34,
+  "drop_geo": true,
+  "covariate_csv": null,
+  "dedupe": {
+    "n_raw": 11148,
+    "n_deduped": 9904,
+    "n_dropped": 1244
+  },
+  "run": {
+    "run_id": "13ae27f00d0b",
+    "timestamp_utc": "2026-11-12T05:49:59+00:00",
+    "git_commit": "a70c6e2",
+    "argv": [
+      "--csv",
+      "data/ncei_thermal_joined.csv",
+      "--drop-geo",
+      "--hier-kappa",
+      "500",
+      "--seeds",
+      "0,1",
+      "--out",
+      "eval/gcbd_ncei_joined.json"
+    ],
+    "seed": 0
+  },
+  "accuracy": 0.7355,
+  "roc_auc_ovr": 0.8802,
+  "seed_sweep": {
+    "seeds": [
+      0,
+      1
+    ],
+    "mean_accuracy": 0.7413,
+    "std_accuracy": 0.0058,
+    "mean_roc_auc": 0.8829
+  },
+  "per_class": {
+    "0": {
+      "average_precision": 0.9044026936895887,
+      "support": 1352
+    },
+    "1": {
+      "average_precision": 0.6768729392726096,
+      "support": 838
+    },
+    "2": {
+      "average_precision": 0.6561228992391338,
+      "support": 286
+    }
+  },
+  "dhw_baseline_accuracy": 0.5347,
+  "majority_baseline_accuracy": 0.546,
+  "grouped_site_holdout": {
+    "accuracy": 0.7319,
+    "n_test": 2309,
+    "n_groups_test": 900
+  },
+  "spatial_block_cv": {
+    "mean_accuracy": 0.7126,
+    "std_accuracy": 0.3007,
+    "n_blocks_eval": 25,
+    "n_blocks_total": 412,
+    "n_blocks": 412,
+    "block_deg": 1.0
+  },
+  "forward_temporal_cv": {
+    "mean_accuracy": 0.6812,
+    "n_folds": 3
+  },
+  "per_basin": {
+    "Central Indo-Pacific": {
+      "n": 523,
+      "accuracy": 0.7099
+    },
+    "Other Reef": {
+      "n": 5385,
+      "accuracy": 0.7847
+    },
+    "Tropical Atlantic": {
+      "n": 3536,
+      "accuracy": 0.6595
+    },
+    "Western Indo-Pacific": {
+      "n": 460,
+      "accuracy": 0.8174
+    }
+  },
+  "hierarchical": {
+    "kappa": 500.0,
+    "min_n": 50,
+    "seed": 0,
+    "n_estimators": 400,
+    "grouped_site": {
+      "global_accuracy": 0.7319,
+      "hier_accuracy": 0.735,
+      "delta": 0.0031
+    },
+    "forward_temporal": {
+      "global_per_fold": [
+        0.6611,
+        0.7488,
+        0.6337
+      ],
+      "hier_per_fold": [
+        0.6474,
+        0.7399,
+        0.6357
+      ],
+      "n_folds": 3,
+      "global_mean": 0.6812,
+      "hier_mean": 0.6743,
+      "delta_mean": -0.0069
+    }
+  },
+  "skill_by_severity": {
+    "overall_accuracy": 0.7355,
+    "dhw_ge_4": {
+      "n": 757,
+      "accuracy": 0.7133
+    },
+    "dhw_ge_8": {
+      "n": 304,
+      "accuracy": 0.6776
+    }
+  },
+  "feature_parity": {
+    "n_deployment_thermal": 30,
+    "n_present_in_gcbd": 0,
+    "present": [],
+    "note": "benchmark uses raw CoRTAD columns; overlap by exact name is expected to be ~0"
+  },
+  "loro_by_realm": {
+    "per_region": [
+      {
+        "held_out": "Central Indo-Pacific",
+        "n_test": 523,
+        "accuracy": 0.5086,
+        "roc_auc_ovr": 0.6809
+      },
+      {
+        "held_out": "Other Reef",
+        "n_test": 5385,
+        "accuracy": 0.5226,
+        "roc_auc_ovr": 0.6789
+      },
+      {
+        "held_out": "Tropical Atlantic",
+        "n_test": 3536,
+        "accuracy": 0.502,
+        "roc_auc_ovr": 0.7084
+      },
+      {
+        "held_out": "Western Indo-Pacific",
+        "n_test": 460,
+        "accuracy": 0.5913,
+        "roc_auc_ovr": 0.7102
+      }
+    ],
+    "mean_accuracy": 0.5311,
+    "std_accuracy": 0.0355,
+    "mean_roc_auc": 0.6946,
+    "n_roc_folds": 4
+  },
+  "ece": 0.0561,
+  "temperature_fit": {
+    "temperature": 1.6485,
+    "temperature_std": 0.0207,
+    "nll_before": 0.6395,
+    "nll_after": 0.5772,
+    "n_splits": 3,
+    "cross_fit": true
+  },
+  "brier_skill": {
+    "brier": 0.1263,
+    "brier_ref_climatology": 0.1913,
+    "bss_vs_climatology": 0.3398
+  },
+  "top_gain_features": [
+    [
+      "SSTA_Standard_Deviation",
+      46056.1
+    ],
+    [
+      "Depth_m",
+      6289.5
+    ],
+    [
+      "SSTA_DHW",
+      5827.8
+    ],
+    [
+      "SSTA_Frequency",
+      5156.0
+    ],
+    [
+      "TSA_DHW",
+      4440.7
+    ],
+    [
+      "TSA",
+      4297.2
+    ],
+    [
+      "SSTA",
+      4123.8
+    ],
+    [
+      "SSTA_Frequency_Standard_Deviation",
+      3986.6
+    ]
+  ]
+}

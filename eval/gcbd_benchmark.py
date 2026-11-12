@@ -30,7 +30,11 @@ DROP_COLS = {"Site_ID", "Sample_ID", "Data_Source", "Reef_ID", "Ocean_Name",
              "Site_Name", "Realm_Name", "Ecoregion_Name", "Substrate_Name",
              "Bleaching_Level", "Percent_Bleaching", "Date", "Date_Day",
              "Date_Month", "Date_Year", "Site_Comments", "Sample_Comments",
-             "Bleaching_Comments"}
+             "Bleaching_Comments",
+             # NCEI-joined frame provenance (eval/join_ncei_thermal.py):
+             # IDs/strings must never become features.
+             "RECORD_ID", "COUNTRY", "CORAL_REGIONS",
+             "thermal_source", "label_source"}
 
 
 def map_labels(pct: pd.Series) -> pd.Series:
@@ -243,6 +247,81 @@ def majority_baseline_accuracy(y_true: np.ndarray) -> float:
     return float((y_true == maj).mean())
 
 
+def hierarchical_vs_global(X, y, groups, site_groups, dates,
+                         kappa: float = 500.0, seed: int = 0,
+                         n_estimators: int = 400, min_n: int = 50) -> dict:
+    """Hier-500 tracked comparison: global head vs shrunk per-realm blend.
+
+    Same-split both arms on two honest axes: one grouped-site holdout
+    (mirrors grouped_split_scores) and forward-temporal CV (mirrors
+    forward_temporal_scores, thresholds-free — this is the basin axis,
+    not the adaptive axis). Realm labels come from `groups`; unseen
+    realms at predict time fall back to the global head by construction.
+    """
+    import numpy as np
+    from sklearn.metrics import accuracy_score
+    from sklearn.model_selection import GroupShuffleSplit, TimeSeriesSplit
+    from models.hierarchical_bleach import HierarchicalBleachClassifier
+    import lightgbm as lgb
+
+    Xa, ya = np.asarray(X, dtype=float), np.asarray(y, dtype=int)
+    ga = np.asarray(groups).ravel().astype(str)
+
+    def _global():
+        return lgb.LGBMClassifier(
+            objective="multiclass", num_class=3, n_estimators=n_estimators,
+            learning_rate=0.05, num_leaves=63, min_child_samples=40,
+            subsample=0.9, colsample_bytree=0.9, reg_lambda=5.0,
+            class_weight="balanced", verbose=-1, random_state=seed)
+
+    # Grouped-site axis: same GroupShuffleSplit for both arms.
+    gss = GroupShuffleSplit(n_splits=1, test_size=0.25, random_state=seed)
+    tr, te = next(gss.split(Xa, ya, np.asarray(site_groups)))
+    g = _global()
+    g.fit(Xa[tr], ya[tr])
+    global_grouped = round(float(accuracy_score(ya[te], g.predict(Xa[te]))), 4)
+    h = HierarchicalBleachClassifier(kappa=float(kappa),
+                                     n_estimators=n_estimators,
+                                     min_n=min_n, seed=seed)
+    h.fit(Xa[tr], ya[tr], groups=ga[tr])
+    hier_grouped = round(float(accuracy_score(
+        ya[te], h.predict(Xa[te], groups=ga[te]))), 4)
+
+    # Forward-temporal axis: same TimeSeriesSplit folds for both arms.
+    order = np.argsort(pd.to_datetime(dates, errors="coerce").to_numpy())
+    Xs, ys, gs = Xa[order], ya[order], ga[order]
+    gb, hb = [], []
+    for ftr, fte in TimeSeriesSplit(n_splits=3).split(Xs):
+        if len(set(ys[ftr].tolist())) < 2 or len(set(ys[fte].tolist())) < 2:
+            continue
+        cg = _global()
+        cg.fit(Xs[ftr], ys[ftr])
+        gb.append(float(accuracy_score(ys[fte], cg.predict(Xs[fte]))))
+        ch = HierarchicalBleachClassifier(
+            kappa=float(kappa), n_estimators=n_estimators,
+            min_n=min_n, seed=seed)
+        ch.fit(Xs[ftr], ys[ftr], groups=gs[ftr])
+        hb.append(float(accuracy_score(ys[fte], ch.predict(Xs[fte],
+                                                           groups=gs[fte]))))
+    global_temporal = round(float(np.mean(gb)), 4) if gb else None
+    hier_temporal = round(float(np.mean(hb)), 4) if hb else None
+    return {
+        "kappa": float(kappa), "min_n": int(min_n), "seed": int(seed),
+        "n_estimators": int(n_estimators),
+        "grouped_site": {
+            "global_accuracy": global_grouped,
+            "hier_accuracy": hier_grouped,
+            "delta": round(hier_grouped - global_grouped, 4)},
+        "forward_temporal": {
+            "global_per_fold": [round(a, 4) for a in gb],
+            "hier_per_fold": [round(a, 4) for a in hb],
+            "n_folds": int(len(gb)),
+            "global_mean": global_temporal, "hier_mean": hier_temporal,
+            "delta_mean": (round(hier_temporal - global_temporal, 4)
+                           if gb else None)},
+    }
+
+
 def run_per_basin(X, y, regions, seed: int = 0, n_estimators: int = 400,
                   min_n: int = 50) -> dict:
     """R8: one model per realm (basin); within-basin 75/25 split.
@@ -336,7 +415,9 @@ def run_benchmark(csv_path: str, subsample: int | None = None,
                   seeds: tuple = (0,), block_deg: float = 1.0,
                   dedupe: bool = True,
                   covariate_csv: str | None = None,
-                  max_blocks: int = 25) -> dict:
+                  max_blocks: int = 25,
+                  hier_kappa: float | None = None,
+                  hier_min_n: int = 50) -> dict:
     """Full benchmark: stratified test + LORO by realm + calibration.
 
     R1 honest validation: optional dedupe of repeat survey rows, seed
@@ -418,6 +499,10 @@ def run_benchmark(csv_path: str, subsample: int | None = None,
             Xn, yn, dates, seed=seed, n_estimators=n_estimators),
         "per_basin": run_per_basin(Xn, yn, reg, seed=seed,
                                    n_estimators=n_estimators),
+        "hierarchical": (hierarchical_vs_global(
+            Xn, yn, reg, _site_groups(raw), dates, kappa=hier_kappa,
+            seed=seed, n_estimators=n_estimators, min_n=hier_min_n)
+            if hier_kappa is not None else None),
         "skill_by_severity": skill_by_severity(
             yte.to_numpy(), pred, X.iloc[first["te_idx"]][DHW_COL].to_numpy()),
         "feature_parity": feature_parity_report(list(X.columns)),
@@ -446,6 +531,9 @@ def main() -> None:
     p.add_argument("--covariate", default=None,
                    help="R8: external lead-time covariate CSV merged by "
                         "Site_ID+Date (e.g. CFSv2 outlook probabilities)")
+    p.add_argument("--hier-kappa", type=float, default=None,
+                   help="track shrunk per-realm blend (kappa=500) vs the "
+                        "global head on grouped-site + temporal, same split")
     args = p.parse_args()
     from eval.run_registry import record
     rep = run_benchmark(args.csv, args.subsample, drop_geo=args.drop_geo,
@@ -453,11 +541,19 @@ def main() -> None:
                         block_deg=args.block_deg,
                         dedupe=not args.no_dedupe,
                         covariate_csv=args.covariate,
-                        max_blocks=args.max_blocks)
+                        max_blocks=args.max_blocks,
+                        hier_kappa=args.hier_kappa)
     print(json.dumps({k: v for k, v in rep.items()
                       if k not in ("loro_by_realm", "temperature_fit",
                                    "per_basin")},
                      indent=2))
+    if rep.get("hierarchical") is not None:
+        hg = rep["hierarchical"]["grouped_site"]
+        ht = rep["hierarchical"]["forward_temporal"]
+        print("hier-500 grouped: %.4f -> %.4f (delta %+.4f)" % (
+            hg["global_accuracy"], hg["hier_accuracy"], hg["delta"]),
+            "| temporal: %s -> %s (delta %s)" % (
+                ht["global_mean"], ht["hier_mean"], ht["delta_mean"]))
     print("LORO mean acc:", rep["loro_by_realm"]["mean_accuracy"],
           "| grouped-site:", rep["grouped_site_holdout"]["accuracy"],
           "| block:", rep["spatial_block_cv"]["mean_accuracy"],

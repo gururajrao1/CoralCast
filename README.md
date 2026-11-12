@@ -73,7 +73,9 @@ Eval: temperature scaling │ realm-LORO │ severity-by-lead (hit/FAR) │ reli
 |---|---|---|
 | `data/ReefCheck_raw.csv` | Sully et al. 2019 repo ([raw CSV](https://raw.githubusercontent.com/InstituteForGlobalEcology/Coral-bleaching-a-global-analysis-of-the-past-two-decades/master/Reef%20Check%20Data%20Raw.csv)), paper [doi:10.1038/s41467-019-09238-2](https://doi.org/10.1038/s41467-019-09238-2) | Survey-level bleaching % |
 | `data/ReefCheck_CoRTAD.csv` | Same repo ([joined CSV](https://raw.githubusercontent.com/InstituteForGlobalEcology/Coral-bleaching-a-global-analysis-of-the-past-two-decades/master/Reef_Check_with_cortad_variables_with_annual_rate_of_SST_change.csv)); CoRTAD = [NOAA NCEI](http://www.ncei.noaa.gov/products/coral-reef-temperature-anomaly-database), [accession](https://accession.nodc.noaa.gov/NCEI-CoRTADv6) | Weekly 4 km AVHRR 1982–2022. **Frozen end-2022**: append CRW 5km / OISST / OSTIA for inference |
-| `data/gcbd_bleaching_environmental.csv` | GCBD BCO-DMO 773466 v2 ([dataset](https://www.bco-dmo.org/dataset/773466)), paper [doi:10.1038/s41597-022-01121-y](https://doi.org/10.1038/s41597-022-01121-y); full 33k-record NCEI Accession 0228498 ([catalog](https://catalog.data.gov/dataset/global-coral-bleaching-database-ncei-accession-0228498)) | Vendored copy n=4,219 (1980–2016, zero S2-era bleached rows). Full-NCEI pull JS/302-gated (G2) |
+| `data/gcbd_bleaching_environmental.csv` | GCBD BCO-DMO 773466 v2 ([dataset](https://www.bco-dmo.org/dataset/773466)), paper [doi:10.1038/s41597-022-01121-y](https://doi.org/10.1038/s41597-022-01121-y) | Vendored copy n=4,219 (1980–2016, zero S2-era bleached rows). Benchmark runs on this (raw CoRTAD columns). |
+| `data/ncei_bleaching_0228498.csv` | NCEI Accession 0228498 ([catalog](https://catalog.data.gov/dataset/global-coral-bleaching-database-ncei-accession-0228498), [doi:10.25921/9xfa-0v97](https://doi.org/10.25921/9xfa-0v97)), tarball `228498.1.1.tar.gz` via the [accession page](https://www.ncei.noaa.gov/archive/accession/0228498) | Vendored raw n=33,244 (1963–2021, median 2014). Presence/absence + PERCENT_BLEACHED (26,084 numeric, 4,761 range/category strings, 2,399 NA); coords complete; YEAR complete, MONTH 584 NA, DAY 14,167 NA. Regions are coarse (`Other Reef`/`Caribbean/GoM`/`GBR`/`West-Indian`), not the 8-realm scheme. |
+| `data/ncei_thermal_joined.csv` | Built by `eval/join_ncei_thermal.py` from the two rows above (no new downloads) | n=11,148 labeled (33.5% of NCEI; 786 unlabeled dropped — the benchmark would map NaN to tier 0). Donor thermals: ReefCheck_CoRTAD 8,221 + GCBD 2,927, matched on rounded coords + survey year, closest-month wins. Labels: numeric, or MIN/MAX midpoint, or range-string midpoint (unsigned-number parsing — hyphens are separators). Realm is one coarse 4-group scheme for all rows. Years 1983–2017. |
 | `data/pilot_stack/*.tif` | [Sentinel-2 L2A COGs](https://registry.opendata.aws/sentinel-2-l2a-cogs/), searched via [Earth Search STAC](https://earth-search.aws.element84.com/v1/search) | Tile 51RWH, 2022-08-25 + 2022-09-29, Sekisei box lon 123.65–123.80 / lat 24.30–24.42 |
 | `data/pilot_sst.csv` | JPL MUR SST v4.1 via [CoastWatch ERDDAP](https://coastwatch.pfeg.noaa.gov/erddap/griddap/jplMURSST41.html) | 1,033 d at 24.31N 123.71E, MMM 29.98 C. Chunk yearly; multi-year single queries drop |
 | `data/pilot_labels.csv` | Derived: ReefCheck_CoRTAD Japan/Sekisei bbox + all bleached Japan rows | 69 rows; surveys are 2003–2004 vs 2022 imagery (mismatch, G7) |
@@ -119,6 +121,7 @@ CLI flags: `--sst_model sstode`, `--multivariate`, `--eval_report`,
 zero-variance/zero-gain features), `--downscale` (R3 patch-trained RCNN
 sharpening of the forecast DHW map), `--per_basin` (R8 quadrant-basin
 heads + global fallback, deployed-vs-global on the same test split),
+`--hier-kappa` (shrunk per-realm blend vs global, grouped + temporal),
 plus `--blue/--green/--red/--nir`
 `--sst_csv --mmm` for pilot runs. Benchmark flags: `--seeds` (sweep with
 CIs), `--max-blocks`, `--block-deg`, `--no-dedupe`, `--covariate` (R8
@@ -136,8 +139,8 @@ GCBD numbers below are re-measured Nov 11 (R1–R10 build, project venv,
 R2/R6 rows and the R8 `--per_basin` run, both re-measured Nov 11. `--prune_dead` + `--downscale` variant
 (re-measured Nov 11): 21/37 features kept, model parity 0.965/0.947, DHW
 gain share 0.231 → 0.300, downscale val RMSE 0.076, site 0.4931 — pruning
-removes dead weight without losing skill. Test suite: 35 tests
-(15 pre-existing + 20 roadmap), 35/35 green Nov 11 on the project venv.
+removes dead weight without losing skill. Test suite: 37 tests
+(15 pre-existing + 22 roadmap), 37/37 green Nov 12 on the project venv.
 
 ### 5.1 Main synthetic pipeline (n_test = 24,000)
 
@@ -227,7 +230,7 @@ hence train-per-basin *with a minimum-n rule*.
 | 5 | SSTODE (`models/sstode_forecast.py`) | rmse < persistence | pass | diffusion term is mislabeled damping; train/infer seasonal-phase mismatch; no uncertainty |
 | 6 | Multivariate (`features/multivariate.py`) | kept incl. freq_above_mmm1_12w | pass | fillna(0)/min_periods=1 biases early windows; optical → global mean/p10 only |
 | 7 | Severity/lead-time (`eval/severity_leadtime.py`) | by_lead len 8 | pass (8-row demo; 22-row full) | ECE on P(severe) only; temp fit on test split; silent null-AUC folds |
-| — | Main forecaster | 35/35 `tests/test_all7.py` | 35/35 OK Nov 11 (project venv, ~80 s) | roadmap tests pin redefined-DHW tiers, nulls, cross-fit determinism, BSS=1 on perfect, prune-mask width, block patches, registry, hier-blend math/fallback, adaptive causal contract |
+| — | Main forecaster | 37/37 `tests/test_all7.py` | 37/37 OK Nov 12 (project venv, ~80 s) | roadmap tests pin redefined-DHW tiers, nulls, cross-fit determinism, BSS=1 on perfect, prune-mask width, block patches, registry, hier-blend math/fallback, adaptive causal contract, hier wiring, NCEI label parsing |
 
 ### 5.5 Pilot Sekisei (all real, n = 69 labels)
 
@@ -244,6 +247,30 @@ duplicates) shows why: always report site-grouped + spatial-block +
 forward-temporal CV beside stratified, dedupe substrate rows to sampling
 events, sweep seeds for CIs, and keep ranking-severe-events AUC (~0.73 at
 5-deg blocks) as the transfer metric.
+
+### 5.7 NCEI-joined frame (Nov 12, `eval/gcbd_ncei_joined.json`)
+
+Offline thermal join (`data/ncei_thermal_joined.csv`, n=11,148 →
+9,904 deduped, thermal-only, seeds 0,1, same flags + `--hier-kappa 500`):
+
+| Split | GCBD (n=4,113) | NCEI-joined (n=9,904) |
+|---|---|---|
+| Stratified (sweep) | 0.696 / ROC 0.854 | **0.741 ± 0.006 / ROC 0.883** |
+| Grouped-site | 0.704 (hier 0.711) | **0.732 (hier 0.735)** |
+| Spatial-block | 0.583 ± 0.40 | **0.713 ± 0.30** |
+| Forward-temporal | 0.492 (hier 0.511) | **0.681 (hier 0.674)** |
+| Realm-LORO | 0.492 ± 0.16 | **0.531 ± 0.04** |
+| DHW / majority baselines | 0.332 / 0.467 | 0.535 / 0.546 (event-enriched frame) |
+| ECE / BSS | 0.124 / +0.24 | **0.056 / +0.34** |
+
+The data did the work, not the pooling: on the joined frame hier-500
+adds +0.003 grouped and −0.007 temporal (fold spread dominates).
+Coarse per-basin: Other Reef 0.78 (n=5,385), CIP 0.71, TAtl 0.66,
+WIP 0.82 (n=460, noisy). DHW≥8 severity 0.678 — severe stays hardest.
+Caveats: donor-matched thermals (correct values, year+0.01° key),
+coarse 4-group realms, 172 range-midpoint labels, mid-year default
+dates; absolute numbers are not head-to-head vs GCBD (different mix) —
+read the honest-split deltas and the +20 over DHW.
 
 ## 6. Research-backed improvements (ranked)
 
@@ -316,7 +343,11 @@ Each item: what to change, why (literature), expected gain, effort.
   (`eval/coral_da.py`) HURTS overall (LORO 0.41 vs 0.49 — helps only
   Tropical Atlantic +0.04, wrecks TNP 0.64→0.10 and EIP) and was removed,
   not merged. Strict LORO stays ~0.49 by construction (unseen realm has
-  no head); grouped-site is the shippable gain.
+  no head); grouped-site is the shippable gain. Tracked rerun Nov 12
+  (seed 0, `--hier-kappa 500`, `eval/gcbd_benchmark_hier500.json`):
+  grouped-site 0.7036 → 0.7109 (+0.0073), forward-temporal 0.4919 →
+  0.511 (+0.0191) — consistent with the probes, now in the registry.
+  NCEI-joined follow-up (§5.7) confirms it: the data does the work.
 - **R9 Atlas-style pilot redo (M).** Warning-triggered biweekly
   baseline-vs-2wk-post median brightening with QA60/SCL masking (Allen
   Atlas design); fix the 2003–04 vs 2022 mismatch; handle 96% imbalance.
@@ -328,7 +359,7 @@ Each item: what to change, why (literature), expected gain, effort.
   export/CLI flags, stronger-than-trivial gates. Shipped Nov 11: 13 roadmap
   tests plus `eval/run_registry.py` stamping
   run-id/seed/git-hash/argv into every metrics JSON and `runs/registry.jsonl`
-  (35/35 green after the global-predictor probes added 7 more).
+  (37/37 green after hier wiring + NCEI join added 2 more).
 
 Deferred with reason: GNN / CNN-LSTM / PINN bleaching heads — no credible
 peer-reviewed skill numbers found (2022–2026 hits were non-peer-reviewed
@@ -351,8 +382,10 @@ ship grouped-site gains and stop chasing LORO with blending.
 Do NOT claim global skill.
 G2 S2 heatwave pilot with contemporaneous labels (blocked, 6 failed
 attempts): BCO-DMO GCBD ends 2016; NCEI full GCBD (accession 0228498,
-33,244 records 1963–2021 — landing page verified reachable with plain
-HTTPS+FTP links, bytes not yet pulled); figshare has no copy;
+33,244 records 1963–2021 — vendored Nov 12;
+`eval/join_ncei_thermal.py` thermally joined 11,148 labeled rows offline
+(§5.7); 21k unmatched rows need per-site MUR SST backfill);
+figshare has no copy;
 Japan ReefCheck ends 2015; CoralWatch
 lives in the BioCollect project store (needs project-API work); Allen
 Atlas layers unverified (likely GEE asset); AIMS dashboard is a JS shell.
@@ -416,10 +449,16 @@ wiring (R8, `--per_basin`) followed the same day, 30/30 tests green.
 Deep-research combo followed: hierarchical shrink (kappa=500, +0.005
 grouped / +0.019 temporal) and adaptive heat features (+0.038 temporal)
 both win at full scale; CORAL rejected (0.41 vs 0.49 LORO); 35/35 tests
-green, CORAL module removed unmerged.
-Next session: re-run the fastest line above, then either pull the NCEI
-33k-record archive (landing page verified, bytes not yet pulled) or wire
-the hier-500/adaptive winners into `run_benchmark` for tracked numbers.
+green Nov 11, CORAL module removed unmerged.
+Nov 12: pulled + vendored NCEI 0228498 (33,244 rows), wired hier-500
+into `run_benchmark` (`--hier-kappa`, 36/36 green;
+`eval/gcbd_benchmark_hier500.json`: grouped +0.0073 / temporal +0.0191),
+then thermally joined 11,148 NCEI rows offline
+(`eval/join_ncei_thermal.py`, +1 label-parser test; 37/37 green).
+Tracked: `eval/gcbd_ncei_joined.json` — stratified 0.741, grouped 0.732,
+block 0.713, temporal 0.681, LORO 0.531.
+Next session: MUR SST backfill for the 21k unmatched NCEI rows, then
+adaptive-arm wiring (same tracked pattern as hier-500).
 
 ## 9. References
 

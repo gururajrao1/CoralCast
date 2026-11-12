@@ -514,6 +514,49 @@ class TestRoadmap(unittest.TestCase):
         self.assertEqual(len(out["base_per_fold"]), out["n_folds"])
         self.assertIsInstance(out["delta_mean"], float)
 
+    def test_hierarchical_benchmark_wiring(self):
+        from eval.gcbd_benchmark import run_benchmark
+        kw = dict(subsample=300, n_estimators=10, drop_geo=True,
+                  hier_kappa=500.0, max_blocks=4)
+        rep = run_benchmark("data/gcbd_bleaching_environmental.csv",
+                            seed=0, **kw)
+        h = rep["hierarchical"]
+        self.assertEqual(h["kappa"], 500.0)
+        # Delta is exactly hier minus global on the same split.
+        self.assertAlmostEqual(
+            h["grouped_site"]["delta"],
+            h["grouped_site"]["hier_accuracy"]
+            - h["grouped_site"]["global_accuracy"], places=9)
+        ft = h["forward_temporal"]
+        if ft["delta_mean"] is None:
+            self.assertEqual(ft["n_folds"], 0)
+        else:
+            self.assertAlmostEqual(
+                ft["delta_mean"],
+                ft["hier_mean"] - ft["global_mean"], places=9)
+        # Opt-out: no flag means no section, and the wiring is
+        # deterministic on the same split.
+        rep0 = run_benchmark("data/gcbd_bleaching_environmental.csv",
+                             subsample=300, n_estimators=10, drop_geo=True)
+        self.assertIsNone(rep0["hierarchical"])
+        rep2 = run_benchmark("data/gcbd_bleaching_environmental.csv",
+                             seed=0, **kw)
+        self.assertEqual(rep2["hierarchical"], h)
+
+    def test_ncei_label_parse(self):
+        from eval.join_ncei_thermal import map_label, parse_percent
+        self.assertEqual(parse_percent("12.5"), (12.5, "percent_numeric"))
+        self.assertEqual(parse_percent("1%-10%"), (5.5, "range_mid"))
+        self.assertEqual(parse_percent(">60"), (60.0, "range_gt"))
+        self.assertEqual(parse_percent("<1"), (0.0, "range_lt1"))
+        self.assertEqual(parse_percent("None_(<1)"), (0.0, "range_lt1"))
+        self.assertEqual(parse_percent("N/A"), (None, "unparseable"))
+        self.assertEqual(parse_percent(None), (None, "missing"))
+        self.assertEqual(parse_percent(float("nan")), (None, "missing"))
+        # Tiers match the benchmark: <1 none, <50 moderate, else severe.
+        self.assertEqual([map_label(v) for v in (0.5, 5.5, 60.0)], [0, 1, 2])
+        self.assertEqual(map_label(1.0), 1)
+
     def test_per_basin_train_and_route(self):
         import numpy as np
         from coral_bleaching_forecaster import (predict_per_basin,
